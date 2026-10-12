@@ -5167,6 +5167,7 @@ version = "0.1.1"
 dependencies = [
  "pool-domain",
  "sqlx",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -5176,7 +5177,9 @@ dependencies = [
 name = "pool-domain"
 version = "0.1.1"
 dependencies = [
+ "pool-chain",
  "serde",
+ "serde_json",
  "thiserror 2.0.21",
 ]
 

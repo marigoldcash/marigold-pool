@@ -1,3 +1,6 @@
+#[cfg(not(any(feature = "chain-marigold", feature = "chain-kaspa")))]
+compile_error!("pick one chain: build with `chain-marigold` (the default) or `chain-kaspa`");
+
 use clap::Parser;
 
 /// Mining pool for Marigold. Not runnable yet; the first runnable version is M9.
@@ -16,9 +19,6 @@ mod tests {
     #[test]
     fn the_version_flag_prints_name_and_version() {
         let text = super::Cli::command().render_version();
-        assert_eq!(
-            text.trim(),
-            format!("marigold-pool {}", env!("CARGO_PKG_VERSION"))
-        );
+        assert_eq!(text.trim(), format!("marigold-pool {}", env!("CARGO_PKG_VERSION")));
     }
 }

@@ -9,5 +9,9 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+pool-chain.workspace = true
 thiserror.workspace = true
 serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

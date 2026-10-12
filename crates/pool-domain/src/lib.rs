@@ -1,12 +1,53 @@
 //! Types and pure logic shared by every other pool crate. Nothing here names a
-//! chain: PLAN.md ground rule 8.
+//! chain: PLAN.md ground rule 8. Whatever differs between chains arrives through
+//! the `pool_chain::Chain` trait.
 
+mod account;
+mod address;
+mod amount;
+mod weight;
+mod worker;
+
+pub use account::{Account, POOL_ACCOUNT};
+pub use address::{AddressError, MinerAddress};
+pub use amount::{Amount, AmountDisplay, UNITS_PER_COIN};
+pub use weight::ShareWeight;
+pub use worker::{DEFAULT_WORKER, MAX_WORKER_NAME_CHARS, WorkerName};
+
+/// A chain for the tests in this crate, so they do not depend on a backend.
 #[cfg(test)]
-mod tests {
-    /// Placeholder that proves the workspace compiles and the test runner on the
-    /// rig is wired up. M2 replaces it with the real domain tests.
-    #[test]
-    fn the_workspace_builds_and_tests_run() {
-        assert_eq!(env!("CARGO_PKG_NAME"), "pool-domain");
+pub(crate) mod test_chain {
+    use pool_chain::Chain;
+
+    pub struct FakeChain;
+
+    impl Chain for FakeChain {
+        fn ticker() -> &'static str {
+            "TST"
+        }
+        fn unit_name() -> &'static str {
+            "grain"
+        }
+        fn address_prefix(network: &str) -> Option<&'static str> {
+            (network == "fakenet").then_some("fake")
+        }
+        fn default_grpc_port(network: &str) -> Option<u16> {
+            (network == "fakenet").then_some(1)
+        }
+        fn default_wrpc_port(network: &str) -> Option<u16> {
+            (network == "fakenet").then_some(2)
+        }
+        fn coinbase_maturity_daa(network: &str) -> Option<u64> {
+            (network == "fakenet").then_some(1000)
+        }
+        fn validate_address(network: &str, text: &str) -> Result<(), String> {
+            if network != "fakenet" {
+                return Err("This network does not exist.".into());
+            }
+            match text.strip_prefix("fake:") {
+                Some(rest) if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_lowercase()) => Ok(()),
+                _ => Err("That does not look like an address. It starts with fake:.".into()),
+            }
+        }
     }
 }
