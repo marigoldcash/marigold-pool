@@ -19,3 +19,4 @@ async-trait.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+pool-chain = { workspace = true, features = ["testing"] }

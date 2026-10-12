@@ -51,6 +51,9 @@ pub struct Payout {
     pub amount: Amount,
     pub status: PayoutStatus,
     pub txid: Option<String>,
+    /// The change address of the transaction that carries the payments, which
+    /// is where to look for it after a restart.
+    pub watch_address: Option<String>,
     /// Why a payout failed, for the operator.
     pub note: Option<String>,
     pub created_ts_ms: u64,
@@ -65,6 +68,7 @@ fn payout_from_row(row: &SqliteRow) -> Result<Payout, DbError> {
         amount: Amount::new(to_u64(row.get("amount"), "payout amount")?),
         status: PayoutStatus::parse(&row.get::<String, _>("status"))?,
         txid: row.get("txid"),
+        watch_address: row.get("watch_address"),
         note: row.get("note"),
         created_ts_ms: to_u64(row.get("created_ts_ms"), "payout created time")?,
         updated_ts_ms: to_u64(row.get("updated_ts_ms"), "payout updated time")?,
@@ -128,79 +132,116 @@ impl Db {
         Ok(written)
     }
 
-    /// `pending` to `sent`: the transaction has been handed to the network.
-    pub async fn mark_payout_sent(&self, id: i64, txid: &str, now_ms: u64) -> Result<(), DbError> {
-        let result =
-            sqlx::query("UPDATE payouts SET status = 'sent', txid = ?1, updated_ts_ms = ?2 WHERE id = ?3 AND status = 'pending'")
+    /// `pending` to `sent`, for a whole batch at once: the transaction that
+    /// carries these payments has this id and this change address, and is about
+    /// to be (or has been) broadcast. All or none.
+    pub async fn mark_payouts_sent(&self, ids: &[i64], txid: &str, watch_address: Option<&str>, now_ms: u64) -> Result<(), DbError> {
+        let now = to_i64(now_ms, "payout time")?;
+        let mut tx = self.wr().begin().await?;
+        for &id in ids {
+            let result = sqlx::query("UPDATE payouts SET status = 'sent', txid = ?1, watch_address = ?2, updated_ts_ms = ?3 WHERE id = ?4 AND status = 'pending'")
                 .bind(txid)
-                .bind(to_i64(now_ms, "payout time")?)
+                .bind(watch_address)
+                .bind(now)
                 .bind(id)
-                .execute(self.wr())
+                .execute(&mut *tx)
                 .await?;
-        if result.rows_affected() == 1 {
-            return Ok(());
+            if result.rows_affected() != 1 {
+                drop(tx);
+                return Err(self.wrong_state(id, "sent").await);
+            }
         }
-        Err(self.wrong_state(id, "sent").await)
+        tx.commit().await?;
+        Ok(())
     }
 
-    /// `sent` to `confirmed`: the network has it. The amount is added to what
-    /// the miner has been paid.
+    /// `pending` to `sent` for one payout.
+    pub async fn mark_payout_sent(&self, id: i64, txid: &str, now_ms: u64) -> Result<(), DbError> {
+        self.mark_payouts_sent(&[id], txid, None, now_ms).await
+    }
+
+    /// `sent` to `confirmed`, for a whole batch: the network has it. Each
+    /// amount is added to what that miner has been paid. All or none.
+    pub async fn confirm_payouts(&self, ids: &[i64], now_ms: u64) -> Result<(), DbError> {
+        let now = to_i64(now_ms, "payout time")?;
+        let mut tx = self.wr().begin().await?;
+        for &id in ids {
+            let row = sqlx::query("SELECT address, amount FROM payouts WHERE id = ?1 AND status = 'sent'")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
+            let Some(row) = row else {
+                drop(tx);
+                return Err(self.wrong_state(id, "confirmed").await);
+            };
+            let address: String = row.get("address");
+            let amount: i64 = row.get("amount");
+            sqlx::query("UPDATE payouts SET status = 'confirmed', updated_ts_ms = ?1 WHERE id = ?2")
+                .bind(now)
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("UPDATE balances SET total_paid = total_paid + ?1 WHERE address = ?2")
+                .bind(amount)
+                .bind(address)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// `sent` to `confirmed` for one payout.
     pub async fn mark_payout_confirmed(&self, id: i64, now_ms: u64) -> Result<(), DbError> {
+        self.confirm_payouts(&[id], now_ms).await
+    }
+
+    /// Give up on payouts that are `pending` or `sent`, for a whole batch: each
+    /// amount goes back onto that miner's balance and the reason is kept for the
+    /// operator. All or none.
+    pub async fn fail_payouts(&self, ids: &[i64], note: &str, now_ms: u64) -> Result<(), DbError> {
+        let now = to_i64(now_ms, "payout time")?;
         let mut tx = self.wr().begin().await?;
-        let row = sqlx::query("SELECT address, amount FROM payouts WHERE id = ?1 AND status = 'sent'")
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await?;
-        let Some(row) = row else {
-            drop(tx);
-            return Err(self.wrong_state(id, "confirmed").await);
-        };
-        let address: String = row.get("address");
-        let amount: i64 = row.get("amount");
-        sqlx::query("UPDATE payouts SET status = 'confirmed', updated_ts_ms = ?1 WHERE id = ?2")
-            .bind(to_i64(now_ms, "payout time")?)
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("UPDATE balances SET total_paid = total_paid + ?1 WHERE address = ?2")
-            .bind(amount)
+        for &id in ids {
+            let row = sqlx::query("SELECT address, amount FROM payouts WHERE id = ?1 AND status IN ('pending', 'sent')")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
+            let Some(row) = row else {
+                drop(tx);
+                return Err(self.wrong_state(id, "failed").await);
+            };
+            let address: String = row.get("address");
+            let amount: i64 = row.get("amount");
+            sqlx::query("UPDATE payouts SET status = 'failed', note = ?1, updated_ts_ms = ?2 WHERE id = ?3")
+                .bind(note)
+                .bind(now)
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query(
+                "INSERT INTO balances (address, balance, total_earned, total_paid) VALUES (?1, ?2, 0, 0) \
+                 ON CONFLICT(address) DO UPDATE SET balance = balance + excluded.balance",
+            )
             .bind(address)
+            .bind(amount)
             .execute(&mut *tx)
             .await?;
+        }
         tx.commit().await?;
         Ok(())
     }
 
-    /// Give up on a payout that is `pending` or `sent`: the amount goes back
-    /// onto the miner's balance and the reason is kept for the operator.
+    /// Give up on one payout that is `pending` or `sent`.
     pub async fn fail_payout(&self, id: i64, note: &str, now_ms: u64) -> Result<(), DbError> {
-        let mut tx = self.wr().begin().await?;
-        let row = sqlx::query("SELECT address, amount FROM payouts WHERE id = ?1 AND status IN ('pending', 'sent')")
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await?;
-        let Some(row) = row else {
-            drop(tx);
-            return Err(self.wrong_state(id, "failed").await);
-        };
-        let address: String = row.get("address");
-        let amount: i64 = row.get("amount");
-        sqlx::query("UPDATE payouts SET status = 'failed', note = ?1, updated_ts_ms = ?2 WHERE id = ?3")
-            .bind(note)
-            .bind(to_i64(now_ms, "payout time")?)
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query(
-            "INSERT INTO balances (address, balance, total_earned, total_paid) VALUES (?1, ?2, 0, 0) \
-             ON CONFLICT(address) DO UPDATE SET balance = balance + excluded.balance",
-        )
-        .bind(address)
-        .bind(amount)
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        Ok(())
+        self.fail_payouts(&[id], note, now_ms).await
+    }
+
+    /// How many payouts, in any state, have ever been written for this miner.
+    pub async fn payout_count(&self, address: &MinerAddress) -> Result<u64, DbError> {
+        let row =
+            sqlx::query("SELECT COUNT(*) AS n FROM payouts WHERE address = ?1").bind(address.as_str()).fetch_one(self.wr()).await?;
+        to_u64(row.get("n"), "payout count")
     }
 
     pub async fn get_payout(&self, id: i64) -> Result<Option<Payout>, DbError> {

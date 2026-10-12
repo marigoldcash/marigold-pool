@@ -2,7 +2,10 @@
 //! network definitions rather than being repeated here, so they cannot drift
 //! from the node this pool is pinned to.
 
-use crate::{BlockReport, Chain, NodeError, NodeUtxo, NodeView, PoolEvents, ShareReport, SharedNode};
+use crate::{
+    BlockReport, Chain, NodeError, NodeUtxo, NodeView, PayError, PoolEvents, ShareReport, SharedNode, SharedPayer, WalletCreated,
+    WalletSettings,
+};
 use kaspa_addresses::{Address, Prefix};
 use kaspa_consensus_core::config::params::Params;
 use kaspa_consensus_core::network::{NetworkId, NetworkType};
@@ -180,6 +183,14 @@ impl Chain for MarigoldChain {
             ));
         }
         Ok(())
+    }
+
+    async fn init_wallet(settings: &WalletSettings) -> Result<WalletCreated, PayError> {
+        crate::marigold_wallet::init_wallet(settings).await
+    }
+
+    async fn open_payer(settings: &WalletSettings) -> Result<SharedPayer, PayError> {
+        crate::marigold_wallet::open_payer(settings).await
     }
 
     async fn connect_node(grpc_url: &str) -> Result<SharedNode, NodeError> {

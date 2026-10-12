@@ -45,12 +45,12 @@ async fn a_fresh_file_gets_the_schema_and_a_second_open_changes_nothing() {
 
     let first = Db::open(&path).await.unwrap();
     assert_eq!(tables(&first).await, ["allocations", "balances", "blocks", "meta", "miners", "payouts", "rewards", "shares"]);
-    assert_eq!(migrations_applied(&first).await, 1);
+    assert_eq!(migrations_applied(&first).await, 2);
     first.meta_set("kept", "yes").await.unwrap();
     first.close().await;
 
     let second = Db::open(&path).await.unwrap();
-    assert_eq!(migrations_applied(&second).await, 1, "the schema is not applied twice");
+    assert_eq!(migrations_applied(&second).await, 2, "the schema is not applied twice");
     assert_eq!(second.meta_get("kept").await.unwrap().as_deref(), Some("yes"), "existing data survives a reopen");
     second.close().await;
 }
@@ -510,4 +510,92 @@ async fn the_read_pool_cannot_write() {
     let error = sqlx::query("INSERT INTO meta (key, value) VALUES ('x', 'y')").execute(db.read_pool()).await.unwrap_err();
     assert!(error.to_string().to_lowercase().contains("readonly"), "{error}");
     db.close().await;
+}
+
+// ---- payouts in batches, the watch address, counts and locks ---------------
+
+#[tokio::test]
+async fn a_batch_goes_to_sent_together_with_its_transaction_id_and_watch_address() {
+    let (db, a) = funded(1_000).await;
+    let ids: Vec<i64> =
+        db.create_pending_payouts(&[payout("k1", &a, 100), payout("k2", &a, 200)], 1).await.unwrap().iter().map(|p| p.id).collect();
+    db.mark_payouts_sent(&ids, "txabc", Some("fake:change7"), 2).await.unwrap();
+    for id in &ids {
+        let p = db.get_payout(*id).await.unwrap().unwrap();
+        assert_eq!(
+            (p.status, p.txid.as_deref(), p.watch_address.as_deref(), p.updated_ts_ms),
+            (PayoutStatus::Sent, Some("txabc"), Some("fake:change7"), 2)
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_batch_that_has_one_wrong_member_changes_none_of_them() {
+    let (db, a) = funded(1_000).await;
+    let ids: Vec<i64> =
+        db.create_pending_payouts(&[payout("k1", &a, 100), payout("k2", &a, 200)], 1).await.unwrap().iter().map(|p| p.id).collect();
+    db.mark_payout_sent(ids[1], "t", 2).await.unwrap(); // the second is already sent
+    let error = db.mark_payouts_sent(&ids, "txabc", None, 3).await.unwrap_err();
+    assert!(matches!(error, DbError::WrongPayoutState { .. }), "{error}");
+    assert_eq!(db.get_payout(ids[0]).await.unwrap().unwrap().status, PayoutStatus::Pending, "the first was rolled back");
+}
+
+#[tokio::test]
+async fn a_batch_is_confirmed_together_and_counts_as_paid() {
+    let (db, a) = funded(1_000).await;
+    let ids: Vec<i64> =
+        db.create_pending_payouts(&[payout("k1", &a, 100), payout("k2", &a, 200)], 1).await.unwrap().iter().map(|p| p.id).collect();
+    db.mark_payouts_sent(&ids, "tx", None, 2).await.unwrap();
+    db.confirm_payouts(&ids, 3).await.unwrap();
+    let balance = db.balance_of(&Account::Miner(a)).await.unwrap().unwrap();
+    assert_eq!((balance.balance, balance.total_paid), (amount(700), amount(300)));
+}
+
+#[tokio::test]
+async fn a_batch_is_failed_together_and_every_amount_comes_back() {
+    let (db, a) = funded(1_000).await;
+    let ids: Vec<i64> =
+        db.create_pending_payouts(&[payout("k1", &a, 100), payout("k2", &a, 200)], 1).await.unwrap().iter().map(|p| p.id).collect();
+    db.fail_payouts(&ids, "cancelled", 2).await.unwrap();
+    let balance = db.balance_of(&Account::Miner(a)).await.unwrap().unwrap();
+    assert_eq!((balance.balance, balance.total_paid), (amount(1_000), Amount::ZERO));
+    assert_eq!(db.payouts_with_status(PayoutStatus::Failed).await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn payouts_are_counted_per_miner_in_every_state() {
+    let (db, a) = funded(1_000).await;
+    assert_eq!(db.payout_count(&a).await.unwrap(), 0);
+    let ids: Vec<i64> = db.create_pending_payouts(&[payout("k1", &a, 100)], 1).await.unwrap().iter().map(|p| p.id).collect();
+    db.fail_payouts(&ids, "x", 2).await.unwrap();
+    db.create_pending_payouts(&[payout("k2", &a, 100)], 3).await.unwrap();
+    assert_eq!(db.payout_count(&a).await.unwrap(), 2, "a failed payout still counts");
+    assert_eq!(db.payout_count(&addr(9)).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn a_lock_keeps_a_second_holder_out_until_it_is_given_back_or_runs_out() {
+    let db = db().await;
+    assert!(db.try_lock("payout", "alice", 1_000, 500).await.unwrap());
+    assert!(!db.try_lock("payout", "bob", 1_100, 500).await.unwrap(), "held by alice");
+    assert!(db.try_lock("payout", "alice", 1_100, 500).await.unwrap(), "the holder may extend it");
+    assert!(!db.try_lock("payout", "bob", 1_599, 500).await.unwrap(), "extended to 1600");
+    assert!(db.try_lock("payout", "bob", 1_600, 500).await.unwrap(), "a lock that ran out is free");
+    db.unlock("payout", "alice").await.unwrap(); // not alice's any more: nothing happens
+    assert!(!db.try_lock("payout", "alice", 1_700, 500).await.unwrap(), "bob still holds it");
+    db.unlock("payout", "bob").await.unwrap();
+    assert!(db.try_lock("payout", "alice", 1_700, 500).await.unwrap(), "given back");
+    assert!(db.try_lock("other", "bob", 1_700, 500).await.unwrap(), "locks are separate by name");
+}
+
+#[tokio::test]
+async fn the_second_migration_is_applied_and_a_reopen_changes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pool.db");
+    let first = Db::open(&path).await.unwrap();
+    assert_eq!(migrations_applied(&first).await, 2);
+    first.close().await;
+    let second = Db::open(&path).await.unwrap();
+    assert_eq!(migrations_applied(&second).await, 2);
+    second.close().await;
 }

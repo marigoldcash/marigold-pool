@@ -45,15 +45,26 @@ pub trait Chain {
     /// Open a connection to the node at `grpc_url` (`grpc://host:port`, or just
     /// `host:port`). The connection reconnects by itself if the node restarts.
     fn connect_node(grpc_url: &str) -> impl std::future::Future<Output = Result<SharedNode, NodeError>> + Send;
+    /// Make a new pool wallet in `settings.data_dir` and say where rewards
+    /// should be paid. Refuses to touch a wallet that already exists.
+    fn init_wallet(settings: &WalletSettings) -> impl std::future::Future<Output = Result<WalletCreated, PayError>> + Send;
+    /// Open the pool wallet and return something that can pay with it.
+    fn open_payer(settings: &WalletSettings) -> impl std::future::Future<Output = Result<SharedPayer, PayError>> + Send;
 }
 
 mod events;
 mod node;
+mod payer;
+#[cfg(feature = "testing")]
+pub mod testing;
 pub use events::{BlockReport, PoolEvents, ShareReport};
 pub use node::{NodeError, NodeUtxo, NodeView, SharedNode};
+pub use payer::{PayError, PayOutput, Payer, SharedPayer, SubmitGuard, TxSighting, WalletCreated, WalletSecret, WalletSettings};
 
 #[cfg(feature = "chain-marigold")]
 mod marigold;
+#[cfg(feature = "chain-marigold")]
+mod marigold_wallet;
 #[cfg(feature = "chain-marigold")]
 pub use marigold::MarigoldChain;
 

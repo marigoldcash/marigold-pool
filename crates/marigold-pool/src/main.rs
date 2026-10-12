@@ -1,6 +1,9 @@
 #[cfg(not(any(feature = "chain-marigold", feature = "chain-kaspa")))]
 compile_error!("pick one chain: build with `chain-marigold` (the default) or `chain-kaspa`");
 
+mod common;
+mod init_cmd;
+mod payout_cmd;
 mod rewards_cmd;
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -18,22 +21,42 @@ struct Cli {
 enum Command {
     /// List the block rewards that have reached an address, and which of them are ready to be split. Reads from the node; changes nothing.
     Rewards(rewards_cmd::RewardsArgs),
+    /// Make the pool wallet and say which address block rewards should be paid to. The wallet password comes from the environment.
+    Init(init_cmd::InitArgs),
+    /// Pay what miners are owed. Use --now to do it straight away.
+    Payout(payout_cmd::PayoutArgs),
+}
+
+fn secret_from_environment() -> Option<String> {
+    std::env::var(common::SECRET_VARIABLE).ok()
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+fn finish(outcome: Result<String, String>) -> ExitCode {
+    match outcome {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(message) => {
+            eprintln!("{message}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
-        Some(Command::Rewards(args)) => match rewards_cmd::run::<pool_chain::ActiveChain>(args).await {
-            Ok(text) => {
-                println!("{text}");
-                ExitCode::SUCCESS
-            }
-            Err(message) => {
-                eprintln!("{message}");
-                ExitCode::FAILURE
-            }
-        },
+        Some(Command::Rewards(args)) => finish(rewards_cmd::run::<pool_chain::ActiveChain>(args).await),
+        Some(Command::Init(args)) => finish(init_cmd::run::<pool_chain::ActiveChain>(args, secret_from_environment()).await),
+        Some(Command::Payout(args)) => {
+            finish(payout_cmd::run::<pool_chain::ActiveChain>(args, secret_from_environment(), now_ms()).await)
+        }
         None => {
             let _ = Cli::command().print_help();
             ExitCode::SUCCESS

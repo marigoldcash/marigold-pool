@@ -24,8 +24,12 @@ chain-marigold = [
     "dep:kaspa-pow",
     "dep:kaspa-hashes",
     "dep:kaspa-math",
+    "dep:futures",
+    "dep:workflow-core",
 ]
 chain-kaspa = []
+# A fake chain for the tests of the crates above this one.
+testing = []
 
 [dependencies]
 async-trait.workspace = true
@@ -40,3 +44,5 @@ kaspa-addresses = { workspace = true, optional = true }
 kaspa-pow = { workspace = true, optional = true }
 kaspa-hashes = { workspace = true, optional = true }
 kaspa-math = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
+workflow-core = { workspace = true, optional = true }

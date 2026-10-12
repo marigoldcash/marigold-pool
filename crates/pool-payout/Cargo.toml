@@ -9,8 +9,14 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+pool-chain.workspace = true
 pool-domain.workspace = true
 pool-db.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+pool-chain = { workspace = true, features = ["testing"] }

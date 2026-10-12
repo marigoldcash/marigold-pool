@@ -32,3 +32,7 @@ toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
+
+[dev-dependencies]
+pool-chain = { workspace = true, features = ["testing"] }
+tempfile.workspace = true
