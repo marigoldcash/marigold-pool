@@ -1,6 +1,7 @@
 #[cfg(not(any(feature = "chain-marigold", feature = "chain-kaspa")))]
 compile_error!("pick one chain: build with `chain-marigold` (the default) or `chain-kaspa`");
 
+mod api_cmd;
 mod common;
 mod init_cmd;
 mod payout_cmd;
@@ -25,6 +26,8 @@ enum Command {
     Init(init_cmd::InitArgs),
     /// Pay what miners are owed. Use --now to do it straight away.
     Payout(payout_cmd::PayoutArgs),
+    /// Serve the pool's pages and API from its database, read-only.
+    Api(api_cmd::ApiArgs),
 }
 
 fn secret_from_environment() -> Option<String> {
@@ -54,6 +57,7 @@ async fn main() -> ExitCode {
     match cli.command {
         Some(Command::Rewards(args)) => finish(rewards_cmd::run::<pool_chain::ActiveChain>(args).await),
         Some(Command::Init(args)) => finish(init_cmd::run::<pool_chain::ActiveChain>(args, secret_from_environment()).await),
+        Some(Command::Api(args)) => finish(api_cmd::run::<pool_chain::ActiveChain>(args).await),
         Some(Command::Payout(args)) => {
             finish(payout_cmd::run::<pool_chain::ActiveChain>(args, secret_from_environment(), now_ms()).await)
         }

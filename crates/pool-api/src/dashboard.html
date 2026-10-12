@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Marigold mining pool</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #fbfaf7; --fg: #1c1b18; --muted: #6b675e; --card: #f1eee6; --line: #ded9cc; --accent: #b76e00; --bad: #b00020;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #151412; --fg: #efece4; --muted: #9a958a; --card: #201e1a; --line: #34312a; --accent: #f0a830; --bad: #ff7a7a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 56rem; margin: 0 auto; padding: 1.5rem 1rem 3rem; }
+  h1 { margin: 0 0 .25rem; font-size: 1.6rem; }
+  h2 { margin: 2rem 0 .75rem; font-size: 1.15rem; }
+  .sub { color: var(--muted); margin: 0 0 1.5rem; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: .75rem; }
+  .stat { background: var(--card); border: 1px solid var(--line); border-radius: .5rem; padding: .75rem .9rem; }
+  .stat .label { color: var(--muted); font-size: .85rem; }
+  .stat .value { font-size: 1.3rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+  form { display: flex; flex-wrap: wrap; gap: .5rem; }
+  input[type=text] { flex: 1 1 18rem; min-width: 0; padding: .6rem .7rem; border: 1px solid var(--line); border-radius: .4rem; background: var(--bg); color: var(--fg); font: inherit; }
+  button { padding: .6rem 1rem; border: 0; border-radius: .4rem; background: var(--accent); color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+  table { width: 100%; border-collapse: collapse; font-size: .95rem; }
+  th, td { text-align: left; padding: .4rem .5rem; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 500; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .scroll { overflow-x: auto; }
+  .error { color: var(--bad); }
+  .muted { color: var(--muted); }
+  .mono { font-family: ui-monospace, monospace; font-size: .85rem; word-break: break-all; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Marigold mining pool</h1>
+  <p class="sub" id="sub">Loading…</p>
+
+  <div class="grid" id="stats"></div>
+
+  <h2>How to join</h2>
+  <p>Point your miner at this pool and log in with your Marigold address, then a dot, then a name for the machine, for example <span class="mono">youraddress.rig1</span>. Each block the pool finds is shared out by how much work each miner did recently, and you are paid automatically once you are owed enough.</p>
+
+  <h2>Your numbers</h2>
+  <form id="find">
+    <input type="text" id="address" placeholder="Your Marigold address" autocomplete="off" spellcheck="false" aria-label="Your Marigold address">
+    <button type="submit">Show my numbers</button>
+  </form>
+  <div id="mine" aria-live="polite"></div>
+
+  <h2>Recent blocks</h2>
+  <div class="scroll"><table id="blocks"></table></div>
+
+  <h2>Recent payments</h2>
+  <div class="scroll"><table id="payouts"></table></div>
+</main>
+<script>
+(function () {
+  "use strict";
+  var stored = "";
+  try { stored = localStorage.getItem("pool-address") || ""; } catch (e) { stored = ""; }
+  var watching = stored;
+
+  function el(tag, text, cls) {
+    var node = document.createElement(tag);
+    if (text !== undefined && text !== null) { node.textContent = String(text); }
+    if (cls) { node.className = cls; }
+    return node;
+  }
+  function clear(node) { while (node.firstChild) { node.removeChild(node.firstChild); } }
+
+  function ago(thenMs, nowMs) {
+    if (thenMs === null || thenMs === undefined) { return "never"; }
+    var s = Math.max(0, Math.round((nowMs - thenMs) / 1000));
+    if (s < 5) { return "just now"; }
+    if (s < 90) { return s + " seconds ago"; }
+    var m = Math.round(s / 60);
+    if (m < 90) { return m + " minutes ago"; }
+    var h = Math.round(m / 60);
+    if (h < 48) { return h + " hours ago"; }
+    return Math.round(h / 24) + " days ago";
+  }
+
+  function speed(hps) {
+    var units = ["H/s", "kH/s", "MH/s", "GH/s", "TH/s", "PH/s", "EH/s"];
+    var i = 0;
+    while (hps >= 1000 && i < units.length - 1) { hps /= 1000; i += 1; }
+    return (i === 0 ? Math.round(hps) : hps.toFixed(2)) + " " + units[i];
+  }
+
+  function get(path) {
+    return fetch(path, { cache: "no-store" }).then(function (r) {
+      return r.json().then(function (body) { return { ok: r.ok, body: body }; });
+    });
+  }
+
+  function stat(label, value) {
+    var box = el("div", null, "stat");
+    box.appendChild(el("div", label, "label"));
+    box.appendChild(el("div", value, "value"));
+    return box;
+  }
+
+  function table(node, head, rows, empty) {
+    clear(node);
+    if (!rows.length) { var p = el("caption", empty, "muted"); node.appendChild(p); return; }
+    var thead = el("thead"), tr = el("tr");
+    head.forEach(function (h) { tr.appendChild(el("th", h.text, h.num ? "num" : "")); });
+    thead.appendChild(tr); node.appendChild(thead);
+    var tbody = el("tbody");
+    rows.forEach(function (cells) {
+      var row = el("tr");
+      cells.forEach(function (c, i) { row.appendChild(el("td", c, head[i].num ? "num" : "")); });
+      tbody.appendChild(row);
+    });
+    node.appendChild(tbody);
+  }
+
+  function showPool(p) {
+    document.getElementById("sub").textContent = "Mining on the " + p.network + " network. Rewards are paid in " + p.ticker + ".";
+    var grid = document.getElementById("stats"); clear(grid);
+    grid.appendChild(stat("Miners online", p.miners_online));
+    grid.appendChild(stat("Machines online", p.workers_online));
+    grid.appendChild(stat("Pool speed", speed(p.hashrate_hps)));
+    grid.appendChild(stat("Blocks found in the last day", p.blocks_24h));
+    grid.appendChild(stat("Last block found", ago(p.last_block_ms, p.now_ms)));
+    grid.appendChild(stat("Pool fee", p.fee_percent + "%"));
+    grid.appendChild(stat("You are paid once you are owed", p.min_payout.display));
+    grid.appendChild(stat("Owed to miners now", p.owed_to_miners.display));
+  }
+
+  function showBlocks(list, nowMs) {
+    table(document.getElementById("blocks"),
+      [{ text: "Found" }, { text: "By" }, { text: "Machine" }, { text: "Result" }],
+      list.map(function (b) { return [ago(b.time_ms, nowMs), b.address.slice(0, 22) + "…", b.worker, b.status]; }),
+      "No blocks yet.");
+  }
+
+  function showPayouts(list, nowMs) {
+    table(document.getElementById("payouts"),
+      [{ text: "When" }, { text: "To" }, { text: "Amount", num: true }, { text: "State" }],
+      list.map(function (x) { return [ago(x.time_ms, nowMs), x.address.slice(0, 22) + "…", x.amount.display, x.status_text]; }),
+      "No payments yet.");
+  }
+
+  function showMine(m, nowMs) {
+    var box = document.getElementById("mine"); clear(box);
+    var grid = el("div", null, "grid");
+    grid.appendChild(stat("Owed to you now", m.balance.display));
+    grid.appendChild(stat("Earned in total", m.total_earned.display));
+    grid.appendChild(stat("Paid to you in total", m.total_paid.display));
+    box.appendChild(grid);
+    box.appendChild(el("h3", "Your machines"));
+    var wrap = el("div", null, "scroll"), t = el("table"); wrap.appendChild(t); box.appendChild(wrap);
+    table(t, [{ text: "Machine" }, { text: "Speed", num: true }, { text: "Last work seen" }],
+      m.workers.map(function (w) { return [w.name, speed(w.hashrate_hps), ago(w.last_share_ms, nowMs)]; }),
+      "No work has been seen from this address in the last two hours.");
+    box.appendChild(el("h3", "Your payments"));
+    var wrap2 = el("div", null, "scroll"), t2 = el("table"); wrap2.appendChild(t2); box.appendChild(wrap2);
+    table(t2, [{ text: "When" }, { text: "Amount", num: true }, { text: "State" }],
+      m.payouts.map(function (x) { return [ago(x.time_ms, nowMs), x.amount.display, x.status_text]; }),
+      "You have not been paid yet.");
+  }
+
+  function showProblem(message) {
+    var box = document.getElementById("mine"); clear(box);
+    box.appendChild(el("p", message, "error"));
+  }
+
+  // Times are measured against the pool's own clock, which arrives with the
+  // pool numbers, so everything below waits for those first.
+  var nowMs = Date.now();
+
+  function refreshLists() {
+    get("/api/blocks?limit=10").then(function (r) { if (r.ok) { showBlocks(r.body, nowMs); } }).catch(function () {});
+    get("/api/payouts?limit=10").then(function (r) { if (r.ok) { showPayouts(r.body, nowMs); } }).catch(function () {});
+  }
+
+  function refreshMine() {
+    if (!watching) { return; }
+    get("/api/miner/" + encodeURIComponent(watching)).then(function (r) {
+      if (r.ok) { showMine(r.body, nowMs); } else { showProblem(r.body.error || "Something went wrong. Please try again."); }
+    }).catch(function () { showProblem("The pool could not be reached. Please try again in a moment."); });
+  }
+
+  function refreshAll() {
+    get("/api/pool").then(function (r) {
+      if (r.ok) { nowMs = r.body.now_ms; showPool(r.body); }
+    }).catch(function () {}).then(function () {
+      refreshLists();
+      refreshMine();
+    });
+  }
+
+  document.getElementById("find").addEventListener("submit", function (event) {
+    event.preventDefault();
+    watching = document.getElementById("address").value.trim();
+    try { localStorage.setItem("pool-address", watching); } catch (e) {}
+    refreshMine();
+  });
+
+  document.getElementById("address").value = stored;
+  refreshAll();
+  setInterval(refreshAll, 15000);
+}());
+</script>
+</body>
+</html>

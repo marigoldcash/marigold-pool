@@ -2710,6 +2710,15 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
 name = "itertools"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba291022dbbd398a455acf126c1e341954079855bc60dfdda641363bd6922569"
+dependencies = [
+ "either",
+]
+
+[[package]]
+name = "itertools"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
@@ -4469,7 +4478,7 @@ dependencies = [
 
 [[package]]
 name = "marigold-pool"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -5123,7 +5132,7 @@ dependencies = [
 
 [[package]]
 name = "pool-accountant"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "async-trait",
  "pool-chain",
@@ -5137,21 +5146,26 @@ dependencies = [
 
 [[package]]
 name = "pool-api"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
+ "async-trait",
  "axum",
+ "pool-accountant",
+ "pool-chain",
  "pool-db",
  "pool-domain",
  "prometheus",
+ "prometheus-parse",
  "serde",
  "serde_json",
  "tokio",
+ "tower",
  "tracing",
 ]
 
 [[package]]
 name = "pool-chain"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "async-trait",
  "futures",
@@ -5171,7 +5185,7 @@ dependencies = [
 
 [[package]]
 name = "pool-db"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "pool-domain",
  "sqlx",
@@ -5183,7 +5197,7 @@ dependencies = [
 
 [[package]]
 name = "pool-domain"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "pool-chain",
  "serde",
@@ -5193,7 +5207,7 @@ dependencies = [
 
 [[package]]
 name = "pool-payout"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5320,6 +5334,18 @@ dependencies = [
  "parking_lot",
  "protobuf",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "prometheus-parse"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "811031bea65e5a401fb2e1f37d802cca6601e204ac463809a3189352d13b78a5"
+dependencies = [
+ "chrono",
+ "itertools 0.12.1",
+ "once_cell",
+ "regex",
 ]
 
 [[package]]

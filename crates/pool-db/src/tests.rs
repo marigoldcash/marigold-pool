@@ -599,3 +599,155 @@ async fn the_second_migration_is_applied_and_a_reopen_changes_nothing() {
     assert_eq!(migrations_applied(&second).await, 2);
     second.close().await;
 }
+
+// ---- the API's questions ---------------------------------------------------
+
+fn share_at(address: &MinerAddress, worker: &str, ts_ms: u64, hash_value: f64) -> NewShare {
+    NewShare {
+        address: address.clone(),
+        worker: WorkerName::new(worker),
+        weight: ShareWeight::new(1_000),
+        hash_value,
+        daa_score: ts_ms,
+        ts_ms,
+    }
+}
+
+const NOW: u64 = 10_000_000;
+
+#[tokio::test]
+async fn an_empty_pool_has_zeroes_and_no_last_times() {
+    let stats = db().await.pool_stats(NOW).await.unwrap();
+    assert_eq!(
+        (
+            stats.miners_online,
+            stats.workers_online,
+            stats.shares_online_window,
+            stats.blocks_24h,
+            stats.last_block_ms,
+            stats.last_share_ms,
+            stats.owed_to_miners
+        ),
+        (0, 0, 0, 0, None, None, Amount::ZERO)
+    );
+    assert_eq!(stats.hash_value_online_window, 0.0);
+}
+
+#[tokio::test]
+async fn online_means_a_share_in_the_last_ten_minutes_inclusive() {
+    let db = db().await;
+    let (a, b) = (addr(1), addr(2));
+    db.insert_shares(&[
+        share_at(&a, "w1", NOW - ONLINE_WINDOW_MS, 10.0), // exactly ten minutes old: still online
+        share_at(&a, "w2", NOW - 1_000, 20.0),            // a second worker of the same miner
+        share_at(&b, "w1", NOW - ONLINE_WINDOW_MS - 1, 99.0), // one millisecond too old
+    ])
+    .await
+    .unwrap();
+    let stats = db.pool_stats(NOW).await.unwrap();
+    assert_eq!((stats.miners_online, stats.workers_online, stats.shares_online_window), (1, 2, 2));
+    assert_eq!(stats.hash_value_online_window, 30.0, "the old share's hashes are not counted");
+    assert_eq!(stats.last_share_ms, Some(NOW - 1_000));
+}
+
+#[tokio::test]
+async fn the_same_worker_name_on_two_miners_counts_as_two_workers() {
+    let db = db().await;
+    db.insert_shares(&[share_at(&addr(1), "rig", NOW, 1.0), share_at(&addr(2), "rig", NOW, 1.0)]).await.unwrap();
+    assert_eq!(db.pool_stats(NOW).await.unwrap().workers_online, 2);
+}
+
+#[tokio::test]
+async fn blocks_in_the_last_day_and_the_newest_block_time_are_counted() {
+    let db = db().await;
+    let now = 3 * DAY_MS; // late enough that "a day ago" is a real time
+    for (hash, ts) in [("old", now - DAY_MS - 1), ("edge", now - DAY_MS), ("new", now - 5)] {
+        let mut b = block(hash);
+        b.ts_ms = ts;
+        db.insert_block(&b).await.unwrap();
+    }
+    let stats = db.pool_stats(now).await.unwrap();
+    assert_eq!(stats.blocks_24h, 2, "a day exactly is inside, a millisecond more is not");
+    assert_eq!(stats.last_block_ms, Some(now - 5));
+}
+
+#[tokio::test]
+async fn what_is_owed_does_not_include_the_pools_own_fee() {
+    let db = db().await;
+    db.record_reward_if_new("r:0", amount(1_000), 1, 0).await.unwrap();
+    db.apply_allocation(
+        "r:0",
+        &[(Account::Pool, amount(10)), (Account::Miner(addr(1)), amount(600)), (Account::Miner(addr(2)), amount(390))],
+        1,
+    )
+    .await
+    .unwrap();
+    assert_eq!(db.pool_stats(NOW).await.unwrap().owed_to_miners, amount(990));
+}
+
+#[tokio::test]
+async fn a_miners_workers_come_most_recent_first_with_their_recent_hashes() {
+    let db = db().await;
+    let a = addr(1);
+    db.insert_shares(&[
+        share_at(&a, "slow", NOW - 3_600_000, 5.0), // an hour ago: stored, not recent
+        share_at(&a, "slow", NOW - 3_000_000, 5.0),
+        share_at(&a, "fast", NOW - 1_000, 7.0),
+        share_at(&a, "fast", NOW - 2_000, 8.0),
+        share_at(&addr(2), "other", NOW, 100.0), // someone else's
+    ])
+    .await
+    .unwrap();
+    let workers = db.workers_of(&a, NOW).await.unwrap();
+    assert_eq!(workers.iter().map(|w| w.worker.as_str()).collect::<Vec<_>>(), ["fast", "slow"]);
+    assert_eq!(
+        (workers[0].last_share_ms, workers[0].shares_online_window, workers[0].hash_value_online_window),
+        (NOW - 1_000, 2, 15.0)
+    );
+    assert_eq!(
+        (workers[1].shares_online_window, workers[1].hash_value_online_window),
+        (0, 0.0),
+        "seen, but not in the last ten minutes"
+    );
+    assert!(db.workers_of(&addr(9), NOW).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn recent_blocks_and_payouts_come_newest_first_and_stop_at_the_limit() {
+    let db = db().await;
+    for (i, hash) in ["b1", "b2", "b3"].iter().enumerate() {
+        let mut b = block(hash);
+        b.ts_ms = 100 + i as u64;
+        db.insert_block(&b).await.unwrap();
+    }
+    assert_eq!(db.recent_blocks(2).await.unwrap().iter().map(|b| b.hash.as_str()).collect::<Vec<_>>(), ["b3", "b2"]);
+
+    let (db2, a) = funded(1_000).await;
+    db2.create_pending_payouts(&[payout("k1", &a, 100)], 1).await.unwrap();
+    db2.create_pending_payouts(&[payout("k2", &a, 200)], 2).await.unwrap();
+    assert_eq!(db2.recent_payouts(10).await.unwrap().iter().map(|p| p.idempotency_key.as_str()).collect::<Vec<_>>(), ["k2", "k1"]);
+    assert_eq!(db2.recent_payouts_of(&a, 1).await.unwrap().len(), 1);
+    assert!(db2.recent_payouts_of(&addr(9), 10).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn payouts_are_counted_by_state() {
+    let (db, a) = funded(1_000).await;
+    assert_eq!(db.payout_counts().await.unwrap(), PayoutCounts::default());
+    let ids: Vec<i64> = db
+        .create_pending_payouts(&[payout("k1", &a, 100), payout("k2", &a, 100), payout("k3", &a, 100)], 1)
+        .await
+        .unwrap()
+        .iter()
+        .map(|p| p.id)
+        .collect();
+    db.mark_payouts_sent(&ids[..2], "tx", None, 2).await.unwrap();
+    db.confirm_payouts(&ids[..1], 3).await.unwrap();
+    db.fail_payouts(&ids[2..], "x", 3).await.unwrap();
+    assert_eq!(db.payout_counts().await.unwrap(), PayoutCounts { pending: 0, sent: 1, confirmed: 1, failed: 1 });
+}
+
+#[tokio::test]
+async fn the_database_answers_a_ping() {
+    db().await.ping().await.unwrap();
+}

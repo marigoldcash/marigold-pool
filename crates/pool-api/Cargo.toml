@@ -9,11 +9,19 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+pool-chain.workspace = true
 pool-domain.workspace = true
 pool-db.workspace = true
+pool-accountant.workspace = true
 axum.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 prometheus.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+pool-chain = { workspace = true, features = ["testing", "chain-marigold"] }
+tower.workspace = true
+prometheus-parse.workspace = true
+async-trait.workspace = true

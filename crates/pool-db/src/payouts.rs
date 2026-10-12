@@ -60,7 +60,7 @@ pub struct Payout {
     pub updated_ts_ms: u64,
 }
 
-fn payout_from_row(row: &SqliteRow) -> Result<Payout, DbError> {
+pub(crate) fn payout_from_row(row: &SqliteRow) -> Result<Payout, DbError> {
     Ok(Payout {
         id: row.get("id"),
         idempotency_key: row.get("idempotency_key"),

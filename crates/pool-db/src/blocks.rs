@@ -28,7 +28,7 @@ pub struct BlockRow {
     pub blue: Option<bool>,
 }
 
-fn block_from_row(row: &SqliteRow) -> Result<BlockRow, DbError> {
+pub(crate) fn block_from_row(row: &SqliteRow) -> Result<BlockRow, DbError> {
     let blue: Option<i64> = row.get("blue");
     Ok(BlockRow {
         hash: row.get("hash"),

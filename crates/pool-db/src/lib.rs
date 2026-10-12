@@ -17,6 +17,7 @@ mod miners;
 mod payouts;
 mod rewards;
 mod shares;
+mod stats;
 #[cfg(test)]
 mod tests;
 
@@ -26,6 +27,7 @@ pub use error::DbError;
 pub use payouts::{NewPayout, Payout, PayoutStatus};
 pub use rewards::Reward;
 pub use shares::NewShare;
+pub use stats::{DAY_MS, ONLINE_WINDOW_MS, PayoutCounts, PoolStats, WorkerStats};
 
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
