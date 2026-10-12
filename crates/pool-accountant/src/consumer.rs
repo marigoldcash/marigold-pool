@@ -63,6 +63,8 @@ pub struct AccountantMetrics {
     pub rewards_seen: AtomicU64,
     /// Blocks whose colour (blue or red) was learned.
     pub blocks_coloured: AtomicU64,
+    /// Block rewards split among the miners.
+    pub rewards_allocated: AtomicU64,
     /// Looks at the node that failed.
     pub node_errors: AtomicU64,
 }

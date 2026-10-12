@@ -4,12 +4,14 @@
 
 mod account;
 mod address;
+mod allocation;
 mod amount;
 mod weight;
 mod worker;
 
 pub use account::{Account, POOL_ACCOUNT};
 pub use address::{AddressError, MinerAddress};
+pub use allocation::{Allocation, MAX_FEE_BP, allocate};
 pub use amount::{Amount, AmountDisplay, UNITS_PER_COIN};
 pub use weight::ShareWeight;
 pub use worker::{DEFAULT_WORKER, MAX_WORKER_NAME_CHARS, WorkerName};
