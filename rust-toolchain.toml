@@ -1,0 +1,10 @@
+# The one toolchain everything builds with: CI, pve3 and every checkout.
+# Pinned on 2026-10-12 after the lint job in CI ran one clippy (1.93) and the
+# release host another (1.98), and the Tests workflow went red on lints nobody
+# had seen locally. Bump it on purpose, in a commit of its own, after `cargo clippy
+# --workspace --tests -- -D warnings` and `cargo fmt --check` pass on the new
+# version; the workflows name the same version beside this file.
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]

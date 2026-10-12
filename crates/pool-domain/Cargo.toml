@@ -1,0 +1,13 @@
+[package]
+name = "pool-domain"
+description = "Marigold pool: amounts, addresses, share weights and the allocation function"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true

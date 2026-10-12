@@ -1,0 +1,19 @@
+[package]
+name = "pool-api"
+description = "Marigold pool: the read-only API, the dashboard page and the metrics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+pool-domain.workspace = true
+pool-db.workspace = true
+axum.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+prometheus.workspace = true
+tracing.workspace = true

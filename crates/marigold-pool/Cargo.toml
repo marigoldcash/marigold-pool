@@ -1,0 +1,34 @@
+[package]
+name = "marigold-pool"
+description = "Mining pool for Marigold (and Kaspa): stratum in, shares counted, rewards paid"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "marigold-pool"
+path = "src/main.rs"
+
+[features]
+default = ["chain-marigold"]
+chain-marigold = ["pool-chain/chain-marigold"]
+chain-kaspa = ["pool-chain/chain-kaspa"]
+
+[dependencies]
+pool-domain.workspace = true
+pool-db.workspace = true
+pool-accountant.workspace = true
+pool-payout.workspace = true
+pool-api.workspace = true
+pool-chain.workspace = true
+clap.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true

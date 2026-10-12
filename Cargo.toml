@@ -1,0 +1,56 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/pool-domain",
+    "crates/pool-db",
+    "crates/pool-accountant",
+    "crates/pool-payout",
+    "crates/pool-api",
+    "crates/pool-chain",
+    "crates/marigold-pool",
+]
+
+[workspace.package]
+version = "0.1.1"
+edition = "2024"
+rust-version = "1.91.0"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/marigoldcash/marigold-pool"
+authors = ["The Marigold developers"]
+
+[workspace.dependencies]
+# The node's crates, pinned to one commit of marigoldcash/marigold (PLAN.md
+# ground rule 9). Move every line to the same new commit together, never one
+# at a time. The crate names are still kaspa-*.
+kaspa-stratum-bridge = { git = "https://github.com/marigoldcash/marigold", rev = "494954619bd942dcb5d002dea4e05678cd69a706" }
+kaspa-wallet-core = { git = "https://github.com/marigoldcash/marigold", rev = "494954619bd942dcb5d002dea4e05678cd69a706" }
+kaspa-wrpc-client = { git = "https://github.com/marigoldcash/marigold", rev = "494954619bd942dcb5d002dea4e05678cd69a706" }
+kaspa-grpc-client = { git = "https://github.com/marigoldcash/marigold", rev = "494954619bd942dcb5d002dea4e05678cd69a706" }
+kaspa-rpc-core = { git = "https://github.com/marigoldcash/marigold", rev = "494954619bd942dcb5d002dea4e05678cd69a706" }
+kaspa-consensus-core = { git = "https://github.com/marigoldcash/marigold", rev = "494954619bd942dcb5d002dea4e05678cd69a706" }
+kaspa-addresses = { git = "https://github.com/marigoldcash/marigold", rev = "494954619bd942dcb5d002dea4e05678cd69a706" }
+kaspa-pow = { git = "https://github.com/marigoldcash/marigold", rev = "494954619bd942dcb5d002dea4e05678cd69a706" }
+kaspa-hashes = { git = "https://github.com/marigoldcash/marigold", rev = "494954619bd942dcb5d002dea4e05678cd69a706" }
+kaspa-math = { git = "https://github.com/marigoldcash/marigold", rev = "494954619bd942dcb5d002dea4e05678cd69a706" }
+
+# The pool's own crates.
+pool-domain = { path = "crates/pool-domain" }
+pool-db = { path = "crates/pool-db" }
+pool-accountant = { path = "crates/pool-accountant" }
+pool-payout = { path = "crates/pool-payout" }
+pool-api = { path = "crates/pool-api" }
+pool-chain = { path = "crates/pool-chain", default-features = false }
+
+# Everything else.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal", "sync"] }
+axum = "0.8"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+thiserror = "2"
+prometheus = "0.14"

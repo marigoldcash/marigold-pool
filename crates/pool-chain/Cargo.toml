@@ -1,0 +1,40 @@
+[package]
+name = "pool-chain"
+description = "Marigold pool: the one place a chain is named"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = ["chain-marigold"]
+# Exactly one backend is compiled in. The Marigold backend links the node's
+# crates from marigoldcash/marigold; the Kaspa backend (M11) will link a
+# rusty-kaspa branch and is empty until then.
+chain-marigold = [
+    "dep:kaspa-stratum-bridge",
+    "dep:kaspa-wallet-core",
+    "dep:kaspa-wrpc-client",
+    "dep:kaspa-grpc-client",
+    "dep:kaspa-rpc-core",
+    "dep:kaspa-consensus-core",
+    "dep:kaspa-addresses",
+    "dep:kaspa-pow",
+    "dep:kaspa-hashes",
+    "dep:kaspa-math",
+]
+chain-kaspa = []
+
+[dependencies]
+kaspa-stratum-bridge = { workspace = true, optional = true }
+kaspa-wallet-core = { workspace = true, optional = true }
+kaspa-wrpc-client = { workspace = true, optional = true }
+kaspa-grpc-client = { workspace = true, optional = true }
+kaspa-rpc-core = { workspace = true, optional = true }
+kaspa-consensus-core = { workspace = true, optional = true }
+kaspa-addresses = { workspace = true, optional = true }
+kaspa-pow = { workspace = true, optional = true }
+kaspa-hashes = { workspace = true, optional = true }
+kaspa-math = { workspace = true, optional = true }

@@ -1,0 +1,16 @@
+[package]
+name = "pool-payout"
+description = "Marigold pool: the payout cycle"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+pool-domain.workspace = true
+pool-db.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
