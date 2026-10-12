@@ -5124,6 +5124,7 @@ dependencies = [
 name = "pool-accountant"
 version = "0.1.1"
 dependencies = [
+ "pool-chain",
  "pool-db",
  "pool-domain",
  "thiserror 2.0.21",

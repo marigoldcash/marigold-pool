@@ -2,13 +2,52 @@
 //! network definitions rather than being repeated here, so they cannot drift
 //! from the node this pool is pinned to.
 
-use crate::Chain;
+use crate::{BlockReport, Chain, PoolEvents, ShareReport};
 use kaspa_addresses::{Address, Prefix};
 use kaspa_consensus_core::config::params::Params;
 use kaspa_consensus_core::network::{NetworkId, NetworkType};
 use std::str::FromStr;
+use std::sync::Arc;
 
 pub struct MarigoldChain;
+
+impl MarigoldChain {
+    /// The sink to hand the Marigold stratum bridge: it turns the bridge's own
+    /// share and block events into the chain-neutral reports and passes them on.
+    pub fn bridge_sink(events: Arc<dyn PoolEvents>) -> Arc<dyn kaspa_stratum_bridge::PoolSink> {
+        Arc::new(BridgeSink { events })
+    }
+}
+
+struct BridgeSink {
+    events: Arc<dyn PoolEvents>,
+}
+
+impl kaspa_stratum_bridge::PoolSink for BridgeSink {
+    fn share_accepted(&self, event: kaspa_stratum_bridge::ShareEvent) {
+        self.events.share_accepted(ShareReport {
+            address: event.address,
+            worker: event.worker,
+            difficulty: event.difficulty,
+            hash_value: event.hash_value,
+            daa_score: event.daa_score,
+            blue_score: event.blue_score,
+            timestamp_ms: event.timestamp_ms,
+        });
+    }
+
+    fn block_found(&self, event: kaspa_stratum_bridge::BlockEvent) {
+        self.events.block_found(BlockReport {
+            address: event.address,
+            worker: event.worker,
+            hash: event.hash,
+            blue_score: event.blue_score,
+            daa_score: event.daa_score,
+            nonce: event.nonce,
+            timestamp_ms: event.timestamp_ms,
+        });
+    }
+}
 
 /// The network types the pool supports: mainnet, testnet-10, and the two local
 /// development networks. Any other id (an unknown word, `testnet-11`,
@@ -97,6 +136,80 @@ impl Chain for MarigoldChain {
 mod tests {
     use super::*;
     use kaspa_addresses::Version;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct Recorder {
+        shares: Mutex<Vec<ShareReport>>,
+        blocks: Mutex<Vec<BlockReport>>,
+    }
+
+    impl PoolEvents for Recorder {
+        fn share_accepted(&self, report: ShareReport) {
+            self.shares.lock().unwrap().push(report);
+        }
+        fn block_found(&self, report: BlockReport) {
+            self.blocks.lock().unwrap().push(report);
+        }
+    }
+
+    #[test]
+    fn the_bridges_share_event_arrives_as_a_report_with_every_field_intact() {
+        let recorder = Arc::new(Recorder::default());
+        let sink = MarigoldChain::bridge_sink(recorder.clone());
+        sink.share_accepted(kaspa_stratum_bridge::ShareEvent {
+            address: "marigoldtest:abc".into(),
+            worker: "asic1".into(),
+            difficulty: 2048.5,
+            hash_value: 4_194_304.25,
+            daa_score: 111,
+            blue_score: 222,
+            timestamp_ms: 333,
+        });
+        let got = recorder.shares.lock().unwrap().clone();
+        assert_eq!(
+            got,
+            vec![ShareReport {
+                address: "marigoldtest:abc".into(),
+                worker: "asic1".into(),
+                difficulty: 2048.5,
+                hash_value: 4_194_304.25,
+                daa_score: 111,
+                blue_score: 222,
+                timestamp_ms: 333,
+            }]
+        );
+        assert!(recorder.blocks.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_bridges_block_event_arrives_as_a_report_with_every_field_intact() {
+        let recorder = Arc::new(Recorder::default());
+        let sink = MarigoldChain::bridge_sink(recorder.clone());
+        sink.block_found(kaspa_stratum_bridge::BlockEvent {
+            address: "marigoldtest:abc".into(),
+            worker: "asic1".into(),
+            hash: "ab12".into(),
+            blue_score: 5,
+            daa_score: 6,
+            nonce: u64::MAX,
+            timestamp_ms: 7,
+        });
+        let got = recorder.blocks.lock().unwrap().clone();
+        assert_eq!(
+            got,
+            vec![BlockReport {
+                address: "marigoldtest:abc".into(),
+                worker: "asic1".into(),
+                hash: "ab12".into(),
+                blue_score: 5,
+                daa_score: 6,
+                nonce: u64::MAX,
+                timestamp_ms: 7,
+            }]
+        );
+        assert!(recorder.shares.lock().unwrap().is_empty());
+    }
 
     fn address(prefix: Prefix) -> String {
         Address::new(prefix, Version::PubKey, &[7u8; 32]).to_string()

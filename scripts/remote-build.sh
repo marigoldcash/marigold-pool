@@ -6,6 +6,7 @@
 #   CHECK=1 scripts/remote-build.sh          # cargo check --workspace --tests
 #   TEST=1  scripts/remote-build.sh          # cargo test --workspace
 #   LINT=1  scripts/remote-build.sh          # cargo fmt --check, then clippy -D warnings
+#   FMT=1   scripts/remote-build.sh          # cargo fmt on the rig, formatted .rs files copied back
 #   NO_BUMP=1 scripts/remote-build.sh        # rebuild the same source on purpose
 #   CARGO_FLAGS="--no-default-features --features chain-kaspa" TEST=1 scripts/remote-build.sh
 #
@@ -15,7 +16,7 @@
 # are incremental. Cargo.lock is fetched back every time, because resolution
 # happens on the rig and the lock file is committed.
 #
-# Only a release build of the binary bumps the version: CHECK, TEST and LINT
+# Only a release build of the binary bumps the version: CHECK, TEST, LINT and FMT
 # produce nothing that anyone could be holding.
 set -euo pipefail
 
@@ -27,7 +28,7 @@ FLAGS="${CARGO_FLAGS:-}"
 
 cd "$(git rev-parse --show-toplevel)"
 
-if [ -z "${CHECK:-}${TEST:-}${LINT:-}" ] && [ -z "${NO_BUMP:-}" ]; then
+if [ -z "${CHECK:-}${TEST:-}${LINT:-}${FMT:-}" ] && [ -z "${NO_BUMP:-}" ]; then
   echo "→ $(scripts/bump-version.sh)"
 fi
 
@@ -40,6 +41,15 @@ rsync -a --delete --info=stats1 \
 fetch_lock() {
   rsync -a -e "$SSH" "$HOST:$REMOTE_DIR/Cargo.lock" ./Cargo.lock 2>/dev/null || true
 }
+
+if [ -n "${FMT:-}" ]; then
+  echo "→ cargo fmt on $HOST"
+  # shellcheck disable=SC2029
+  $SSH "$HOST" "cd $REMOTE_DIR && cargo fmt --all"
+  rsync -a -e "$SSH" --include='*/' --include='*.rs' --exclude='*' "$HOST:$REMOTE_DIR/crates/" crates/
+  echo "✓ formatted; review with git diff"
+  exit 0
+fi
 
 if [ -n "${LINT:-}" ]; then
   echo "→ fmt and clippy on $HOST"

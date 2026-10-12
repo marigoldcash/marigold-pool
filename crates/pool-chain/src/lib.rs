@@ -44,6 +44,9 @@ pub trait Chain {
     fn validate_address(network: &str, text: &str) -> Result<(), String>;
 }
 
+mod events;
+pub use events::{BlockReport, PoolEvents, ShareReport};
+
 #[cfg(feature = "chain-marigold")]
 mod marigold;
 #[cfg(feature = "chain-marigold")]

@@ -9,6 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+pool-chain.workspace = true
 pool-domain.workspace = true
 pool-db.workspace = true
 tokio.workspace = true
