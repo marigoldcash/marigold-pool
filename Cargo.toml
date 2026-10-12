@@ -22,16 +22,16 @@ authors = ["The Marigold developers"]
 # The node's crates, pinned to one commit of marigoldcash/marigold (PLAN.md
 # ground rule 9). Move every line to the same new commit together, never one
 # at a time. The crate names are still kaspa-*.
-kaspa-stratum-bridge = { git = "https://github.com/marigoldcash/marigold", rev = "494954619bd942dcb5d002dea4e05678cd69a706" }
-kaspa-wallet-core = { git = "https://github.com/marigoldcash/marigold", rev = "494954619bd942dcb5d002dea4e05678cd69a706" }
-kaspa-wrpc-client = { git = "https://github.com/marigoldcash/marigold", rev = "494954619bd942dcb5d002dea4e05678cd69a706" }
-kaspa-grpc-client = { git = "https://github.com/marigoldcash/marigold", rev = "494954619bd942dcb5d002dea4e05678cd69a706" }
-kaspa-rpc-core = { git = "https://github.com/marigoldcash/marigold", rev = "494954619bd942dcb5d002dea4e05678cd69a706" }
-kaspa-consensus-core = { git = "https://github.com/marigoldcash/marigold", rev = "494954619bd942dcb5d002dea4e05678cd69a706" }
-kaspa-addresses = { git = "https://github.com/marigoldcash/marigold", rev = "494954619bd942dcb5d002dea4e05678cd69a706" }
-kaspa-pow = { git = "https://github.com/marigoldcash/marigold", rev = "494954619bd942dcb5d002dea4e05678cd69a706" }
-kaspa-hashes = { git = "https://github.com/marigoldcash/marigold", rev = "494954619bd942dcb5d002dea4e05678cd69a706" }
-kaspa-math = { git = "https://github.com/marigoldcash/marigold", rev = "494954619bd942dcb5d002dea4e05678cd69a706" }
+kaspa-stratum-bridge = { git = "https://github.com/marigoldcash/marigold", rev = "52c8c50832d9caa72b7ce03630eb5d726ff318f7" }
+kaspa-wallet-core = { git = "https://github.com/marigoldcash/marigold", rev = "52c8c50832d9caa72b7ce03630eb5d726ff318f7" }
+kaspa-wrpc-client = { git = "https://github.com/marigoldcash/marigold", rev = "52c8c50832d9caa72b7ce03630eb5d726ff318f7" }
+kaspa-grpc-client = { git = "https://github.com/marigoldcash/marigold", rev = "52c8c50832d9caa72b7ce03630eb5d726ff318f7" }
+kaspa-rpc-core = { git = "https://github.com/marigoldcash/marigold", rev = "52c8c50832d9caa72b7ce03630eb5d726ff318f7" }
+kaspa-consensus-core = { git = "https://github.com/marigoldcash/marigold", rev = "52c8c50832d9caa72b7ce03630eb5d726ff318f7" }
+kaspa-addresses = { git = "https://github.com/marigoldcash/marigold", rev = "52c8c50832d9caa72b7ce03630eb5d726ff318f7" }
+kaspa-pow = { git = "https://github.com/marigoldcash/marigold", rev = "52c8c50832d9caa72b7ce03630eb5d726ff318f7" }
+kaspa-hashes = { git = "https://github.com/marigoldcash/marigold", rev = "52c8c50832d9caa72b7ce03630eb5d726ff318f7" }
+kaspa-math = { git = "https://github.com/marigoldcash/marigold", rev = "52c8c50832d9caa72b7ce03630eb5d726ff318f7" }
 
 # The pool's own crates.
 pool-domain = { path = "crates/pool-domain" }
