@@ -1,15 +1,44 @@
 #[cfg(not(any(feature = "chain-marigold", feature = "chain-kaspa")))]
 compile_error!("pick one chain: build with `chain-marigold` (the default) or `chain-kaspa`");
 
-use clap::Parser;
+mod rewards_cmd;
 
-/// Mining pool for Marigold. Not runnable yet; the first runnable version is M9.
+use clap::{CommandFactory, Parser, Subcommand};
+use std::process::ExitCode;
+
+/// Mining pool for Marigold. Most of it is not runnable yet; the first runnable version is M9.
 #[derive(Parser)]
 #[command(name = "marigold-pool", version)]
-struct Cli {}
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
 
-fn main() {
-    let _ = Cli::parse();
+#[derive(Subcommand)]
+enum Command {
+    /// List the block rewards that have reached an address, and which of them are ready to be split. Reads from the node; changes nothing.
+    Rewards(rewards_cmd::RewardsArgs),
+}
+
+#[tokio::main]
+async fn main() -> ExitCode {
+    let cli = Cli::parse();
+    match cli.command {
+        Some(Command::Rewards(args)) => match rewards_cmd::run::<pool_chain::ActiveChain>(args).await {
+            Ok(text) => {
+                println!("{text}");
+                ExitCode::SUCCESS
+            }
+            Err(message) => {
+                eprintln!("{message}");
+                ExitCode::FAILURE
+            }
+        },
+        None => {
+            let _ = Cli::command().print_help();
+            ExitCode::SUCCESS
+        }
+    }
 }
 
 #[cfg(test)]

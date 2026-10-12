@@ -175,6 +175,21 @@ async fn a_blocks_colour_can_be_recorded_once_it_is_known() {
     assert!(!db.set_block_blue("nope", true).await.unwrap());
 }
 
+#[tokio::test]
+async fn blocks_waiting_for_a_colour_can_be_listed_from_a_time_on() {
+    let db = db().await;
+    for (hash, ts) in [("old", 100u64), ("mid", 200), ("new", 300)] {
+        let mut b = block(hash);
+        b.ts_ms = ts;
+        db.insert_block(&b).await.unwrap();
+    }
+    db.set_block_blue("mid", true).await.unwrap();
+    let hashes: Vec<String> = db.unresolved_blocks_since(150).await.unwrap().into_iter().map(|b| b.hash).collect();
+    assert_eq!(hashes, ["new"], "mid is coloured, old is too old");
+    let all: Vec<String> = db.unresolved_blocks_since(0).await.unwrap().into_iter().map(|b| b.hash).collect();
+    assert_eq!(all, ["old", "new"]);
+}
+
 // ---- rewards and allocation ---------------------------------------------
 
 fn amount(n: u64) -> Amount {

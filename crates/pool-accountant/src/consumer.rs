@@ -59,6 +59,12 @@ pub struct AccountantMetrics {
     /// Events the consumer missed because it fell behind the bridge.
     pub events_lagged: AtomicU64,
     pub flush_errors: AtomicU64,
+    /// Block rewards seen arriving at the pool's address.
+    pub rewards_seen: AtomicU64,
+    /// Blocks whose colour (blue or red) was learned.
+    pub blocks_coloured: AtomicU64,
+    /// Looks at the node that failed.
+    pub node_errors: AtomicU64,
 }
 
 fn add(counter: &AtomicU64, n: u64) {

@@ -42,10 +42,15 @@ pub trait Chain {
     /// Whether `text` is an address on `network`. When it is not, the error is a
     /// sentence a person can read and act on.
     fn validate_address(network: &str, text: &str) -> Result<(), String>;
+    /// Open a connection to the node at `grpc_url` (`grpc://host:port`, or just
+    /// `host:port`). The connection reconnects by itself if the node restarts.
+    fn connect_node(grpc_url: &str) -> impl std::future::Future<Output = Result<SharedNode, NodeError>> + Send;
 }
 
 mod events;
+mod node;
 pub use events::{BlockReport, PoolEvents, ShareReport};
+pub use node::{NodeError, NodeUtxo, NodeView, SharedNode};
 
 #[cfg(feature = "chain-marigold")]
 mod marigold;

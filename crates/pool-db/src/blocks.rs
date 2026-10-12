@@ -66,6 +66,16 @@ impl Db {
         row.as_ref().map(block_from_row).transpose()
     }
 
+    /// Blocks whose colour is not yet known and that were found at or after
+    /// `min_ts_ms`, oldest first.
+    pub async fn unresolved_blocks_since(&self, min_ts_ms: u64) -> Result<Vec<BlockRow>, DbError> {
+        let rows = sqlx::query("SELECT * FROM blocks WHERE blue IS NULL AND ts_ms >= ?1 ORDER BY ts_ms, hash")
+            .bind(to_i64(min_ts_ms, "block time")?)
+            .fetch_all(self.wr())
+            .await?;
+        rows.iter().map(block_from_row).collect()
+    }
+
     /// Record a block's colour. Returns `false` if the block is not stored.
     pub async fn set_block_blue(&self, hash: &str, blue: bool) -> Result<bool, DbError> {
         let result =

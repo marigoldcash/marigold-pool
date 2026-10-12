@@ -28,6 +28,8 @@ chain-marigold = [
 chain-kaspa = []
 
 [dependencies]
+async-trait.workspace = true
+thiserror.workspace = true
 kaspa-stratum-bridge = { workspace = true, optional = true }
 kaspa-wallet-core = { workspace = true, optional = true }
 kaspa-wrpc-client = { workspace = true, optional = true }

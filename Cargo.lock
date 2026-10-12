@@ -4469,7 +4469,7 @@ dependencies = [
 
 [[package]]
 name = "marigold-pool"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -5122,11 +5122,13 @@ dependencies = [
 
 [[package]]
 name = "pool-accountant"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
+ "async-trait",
  "pool-chain",
  "pool-db",
  "pool-domain",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -5134,7 +5136,7 @@ dependencies = [
 
 [[package]]
 name = "pool-api"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "axum",
  "pool-db",
@@ -5148,8 +5150,9 @@ dependencies = [
 
 [[package]]
 name = "pool-chain"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
+ "async-trait",
  "kaspa-addresses",
  "kaspa-consensus-core",
  "kaspa-grpc-client",
@@ -5160,11 +5163,12 @@ dependencies = [
  "kaspa-stratum-bridge",
  "kaspa-wallet-core",
  "kaspa-wrpc-client",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "pool-db"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "pool-domain",
  "sqlx",
@@ -5176,7 +5180,7 @@ dependencies = [
 
 [[package]]
 name = "pool-domain"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "pool-chain",
  "serde",
@@ -5186,7 +5190,7 @@ dependencies = [
 
 [[package]]
 name = "pool-payout"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "pool-db",
  "pool-domain",

@@ -2,9 +2,13 @@
 //! coinbase outputs (M4), allocation by window (M5).
 
 mod consumer;
+#[cfg(test)]
+mod fake_node;
+mod rewards;
 mod sink;
 
 pub use consumer::{AccountantMetrics, ConsumerSettings, run_consumer};
+pub use rewards::{PollError, PollSummary, WatcherSettings, is_mature, poll_once, run_reward_watcher};
 pub use sink::{BroadcastSink, EVENT_CHANNEL_CAPACITY, PoolEvent};
 
 /// A chain for the tests in this crate, so they do not depend on a backend.
@@ -32,6 +36,9 @@ pub(crate) mod test_chain {
         }
         fn coinbase_maturity_daa(network: &str) -> Option<u64> {
             (network == "fakenet").then_some(1000)
+        }
+        async fn connect_node(_grpc_url: &str) -> Result<pool_chain::SharedNode, pool_chain::NodeError> {
+            Err(pool_chain::NodeError("there is no node in the tests".into()))
         }
         fn validate_address(network: &str, text: &str) -> Result<(), String> {
             if network != "fakenet" {

@@ -2,10 +2,14 @@
 //! network definitions rather than being repeated here, so they cannot drift
 //! from the node this pool is pinned to.
 
-use crate::{BlockReport, Chain, PoolEvents, ShareReport};
+use crate::{BlockReport, Chain, NodeError, NodeUtxo, NodeView, PoolEvents, ShareReport, SharedNode};
 use kaspa_addresses::{Address, Prefix};
 use kaspa_consensus_core::config::params::Params;
 use kaspa_consensus_core::network::{NetworkId, NetworkType};
+use kaspa_grpc_client::GrpcClient;
+use kaspa_hashes::Hash;
+use kaspa_rpc_core::api::rpc::RpcApi;
+use kaspa_rpc_core::notify::mode::NotificationMode;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -59,6 +63,53 @@ fn network_type(id: &str) -> Option<NetworkType> {
         (NetworkType::Testnet, _) => None,
         (other, None) => Some(other),
         (_, Some(_)) => None,
+    }
+}
+
+/// The node, over gRPC. The client reconnects by itself if the node restarts.
+struct GrpcNode {
+    client: GrpcClient,
+}
+
+fn node_error(what: &str, error: impl std::fmt::Display) -> NodeError {
+    NodeError(format!("The node did not answer {what}: {error}"))
+}
+
+#[async_trait::async_trait]
+impl NodeView for GrpcNode {
+    async fn virtual_daa_score(&self) -> Result<u64, NodeError> {
+        let info = self.client.get_block_dag_info().await.map_err(|e| node_error("the request for its current DAA score", e))?;
+        Ok(info.virtual_daa_score)
+    }
+
+    async fn utxos_at(&self, address: &str) -> Result<Vec<NodeUtxo>, NodeError> {
+        let parsed = Address::try_from(address).map_err(|e| NodeError(format!("{address:?} is not an address: {e}")))?;
+        let entries = self
+            .client
+            .get_utxos_by_addresses(vec![parsed])
+            .await
+            .map_err(|e| node_error("the request for an address's outputs", e))?;
+        Ok(entries
+            .into_iter()
+            .map(|entry| NodeUtxo {
+                outpoint: format!("{}:{}", entry.outpoint.transaction_id, entry.outpoint.index),
+                amount: entry.utxo_entry.amount,
+                block_daa_score: entry.utxo_entry.block_daa_score,
+                is_coinbase: entry.utxo_entry.is_coinbase,
+            })
+            .collect())
+    }
+
+    async fn balance_at(&self, address: &str) -> Result<u64, NodeError> {
+        let parsed = Address::try_from(address).map_err(|e| NodeError(format!("{address:?} is not an address: {e}")))?;
+        self.client.get_balance_by_address(parsed).await.map_err(|e| node_error("the request for an address's balance", e))
+    }
+
+    async fn block_is_blue(&self, hash: &str) -> Result<bool, NodeError> {
+        let parsed = Hash::from_str(hash).map_err(|e| NodeError(format!("{hash:?} is not a block hash: {e}")))?;
+        let colour =
+            self.client.get_current_block_color(parsed).await.map_err(|e| node_error("the request for a block's colour", e))?;
+        Ok(colour.blue)
     }
 }
 
@@ -129,6 +180,23 @@ impl Chain for MarigoldChain {
             ));
         }
         Ok(())
+    }
+
+    async fn connect_node(grpc_url: &str) -> Result<SharedNode, NodeError> {
+        let url = if grpc_url.starts_with("grpc://") { grpc_url.to_owned() } else { format!("grpc://{grpc_url}") };
+        let client = GrpcClient::connect_with_args(
+            NotificationMode::Direct,
+            url.clone(),
+            None,
+            true,
+            None,
+            false,
+            Some(500_000),
+            Default::default(),
+        )
+        .await
+        .map_err(|e| NodeError(format!("Could not reach the node at {url}: {e}")))?;
+        Ok(Arc::new(GrpcNode { client }))
     }
 }
 
