@@ -112,7 +112,7 @@ Everything is in place. Nothing has been started. The rest is yours:
      words, once. Write the words down; the pool does not keep them.
 
        systemd-run --quiet --wait --pipe --collect --uid=marigold \
-         --property=EnvironmentFile=/etc/marigold/pool.env \
+         --property=EnvironmentFile=/etc/marigold/pool.env --setenv=HOME=/var/lib/marigold/pool \
          /opt/marigold/bin/marigold-pool init --data-dir /var/lib/marigold/pool --network testnet-10
 
   2. Put that address into /etc/marigold/pool.toml, on the line   address = ""
@@ -145,7 +145,7 @@ program at a time, so the pool is stopped for the moment this takes:
 
        systemctl stop marigold-pool
        systemd-run --quiet --wait --pipe --collect --uid=marigold \
-         --property=EnvironmentFile=/etc/marigold/pool.env \
+         --property=EnvironmentFile=/etc/marigold/pool.env --setenv=HOME=/var/lib/marigold/pool \
          /opt/marigold/bin/marigold-pool payout --now --config /etc/marigold/pool.toml
        systemctl start marigold-pool
 
