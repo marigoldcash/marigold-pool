@@ -7,7 +7,7 @@
 use pool_accountant::{DEFAULT_FEE_BP, DEFAULT_WINDOW_DAA};
 use pool_chain::{BridgeSettings, Chain, StratumPort};
 use pool_domain::{Amount, MinerAddress};
-use pool_payout::{DEFAULT_MIN_PAYOUT_COINS, Schedule};
+use pool_payout::{DEFAULT_MIN_PAYOUT_COINS, MIN_PAYOUT_FLOOR_COINS, Schedule};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
@@ -177,10 +177,12 @@ fn host_and_port(text: &str) -> Option<String> {
     (!host.is_empty() && port.parse::<u16>().is_ok_and(|p| p != 0)).then(|| bare.to_owned())
 }
 
-fn toml_coins_to_units(value: &toml::Value) -> Option<u64> {
+/// A TOML number of coins as an exact amount. A float is read back through its
+/// shortest decimal text, which is what was written in the file.
+fn toml_coins(value: &toml::Value) -> Option<Amount> {
     match value {
-        toml::Value::Integer(n) => crate::common::coins_to_units(*n as f64),
-        toml::Value::Float(f) => crate::common::coins_to_units(*f),
+        toml::Value::Integer(n) => Amount::parse_coins(&n.to_string()),
+        toml::Value::Float(f) => Amount::parse_coins(&f.to_string()),
         _ => None,
     }
 }
@@ -267,6 +269,8 @@ impl PoolConfig {
 
         // The minimum payout is named after the chain's ticker, like min_payout_magld.
         let min_key = format!("min_payout_{}", C::ticker().to_lowercase());
+        let floor = Amount::from_coins(MIN_PAYOUT_FLOOR_COINS).unwrap_or(Amount::ZERO);
+        let floor_coins = floor.display::<C>().to_string();
         let mut min_payout = Amount::from_coins(DEFAULT_MIN_PAYOUT_COINS).unwrap_or(Amount::ZERO);
         let mut stray: Vec<&String> = raw.pool.other.keys().filter(|k| **k != min_key).collect();
         stray.sort();
@@ -274,11 +278,12 @@ impl PoolConfig {
             problem(format!("[pool] {key} is not a setting the pool knows. (The minimum payout is called {min_key}.)"));
         }
         if let Some(value) = raw.pool.other.get(&min_key) {
-            match toml_coins_to_units(value) {
-                Some(units) => min_payout = Amount::new(units),
-                None => problem(format!(
-                    "[pool] {min_key} must be a number of coins above zero, with at most eight decimals, like 10 or 0.5."
+            match toml_coins(value) {
+                Some(amount) if amount >= floor => min_payout = amount,
+                Some(_) => problem(format!(
+                    "[pool] {min_key} cannot be lower than {floor_coins}. Smaller payments cost the network more to carry than they are worth, and they do not work. {floor_coins} is also what every miner starts at."
                 )),
+                None => problem(format!("[pool] {min_key} must be a number of coins, with at most eight decimals, like 10 or 25.5.")),
             }
         }
 
@@ -408,7 +413,11 @@ impl PoolConfig {
             format!("Node: {} (stratum and rewards), {} (wallet)", self.node_grpc, self.node_wrpc),
             format!("Stratum ports: {}", ports.join(", ")),
             format!("Pool fee: {}.{:02}%", self.fee_bp / 100, self.fee_bp % 100),
-            format!("Miners are paid once owed {}, on the schedule \"{}\"", self.min_payout.display::<C>(), self.payout_cron),
+            format!(
+                "Miners are paid {}, once owed at least {} (each miner may choose a higher level)",
+                self.payout_schedule.describe(),
+                self.min_payout.display::<C>()
+            ),
             format!("Share window: {} steps", self.window_daa),
             format!("Pages and metrics: http://{}/", self.api_bind),
             format!("Data directory: {}", self.data_dir.display()),
@@ -482,12 +491,12 @@ min_share_diff = 0.002
 
     #[test]
     fn the_minimum_payout_is_named_after_the_chains_ticker_and_may_have_decimals() {
-        let c = PoolConfig::parse::<FakeChain>(&with("data_dir", "min_payout_tst = 0.5\ndata_dir")).unwrap();
-        assert_eq!(c.min_payout.units(), 50_000_000, "half a coin");
+        let c = PoolConfig::parse::<FakeChain>(&with("data_dir", "min_payout_tst = 12.5\ndata_dir")).unwrap();
+        assert_eq!(c.min_payout.units(), 1_250_000_000, "twelve and a half coins");
         let c = PoolConfig::parse::<FakeChain>(&with("data_dir", "min_payout_tst = 25\ndata_dir")).unwrap();
         assert_eq!(c.min_payout.units(), 25 * UNITS_PER_COIN);
-        let c = PoolConfig::parse::<FakeChain>(&with("data_dir", "min_payout_tst = 0.00000001\ndata_dir")).unwrap();
-        assert_eq!(c.min_payout.units(), 1, "a single smallest unit");
+        let c = PoolConfig::parse::<FakeChain>(&with("data_dir", "min_payout_tst = 10.00000001\ndata_dir")).unwrap();
+        assert_eq!(c.min_payout.units(), 1_000_000_001, "read exactly, with no rounding");
     }
 
     #[test]
@@ -498,11 +507,24 @@ min_share_diff = 0.002
 
     #[test]
     fn a_bad_minimum_payout_is_explained() {
-        for bad in ["0", "-3", "\"ten\"", "1e20", "true"] {
+        for bad in ["-3", "\"ten\"", "1e20", "true"] {
             let found = problems(&with("data_dir", &format!("min_payout_tst = {bad}\ndata_dir")));
             assert_eq!(found.len(), 1, "{bad}: {found:?}");
-            assert!(found[0].contains("min_payout_tst must be a number of coins above zero"), "{bad}: {found:?}");
+            assert!(found[0].contains("min_payout_tst must be a number of coins"), "{bad}: {found:?}");
         }
+    }
+
+    #[test]
+    fn the_minimum_payout_cannot_be_set_below_ten() {
+        for low in ["0", "0.5", "1", "9.99999999"] {
+            let found = problems(&with("data_dir", &format!("min_payout_tst = {low}\ndata_dir")));
+            assert_eq!(found.len(), 1, "{low}: {found:?}");
+            assert!(
+                found[0].contains("min_payout_tst cannot be lower than 10.00 TST") && found[0].contains("do not work"),
+                "{low}: {found:?}"
+            );
+        }
+        assert!(PoolConfig::parse::<FakeChain>(&with("data_dir", "min_payout_tst = 10\ndata_dir")).is_ok(), "ten itself is allowed");
     }
 
     #[test]
@@ -711,7 +733,7 @@ min_share_diff = 0.002
             "Network: testnet-10",
             "Stratum ports: :5570 (easiest share 0.002), :5571 (easiest share 2048)",
             "Pool fee: 1.00%",
-            "once owed 10.00 MAGLD",
+            "every day at 05:00 UTC, once owed at least 10.00 MAGLD",
             "Pages and metrics: http://127.0.0.1:8788/",
         ] {
             assert!(summary.contains(needle), "missing {needle:?} in:\n{summary}");

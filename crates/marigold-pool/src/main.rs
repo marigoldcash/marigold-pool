@@ -6,6 +6,7 @@ mod check_cmd;
 mod common;
 mod config;
 mod init_cmd;
+mod miner_cmd;
 mod payout_cmd;
 mod rewards_cmd;
 mod serve;
@@ -33,6 +34,8 @@ enum Command {
     Api(api_cmd::ApiArgs),
     /// Read the settings file and say what the pool would do, or what is wrong with it. Starts nothing.
     Check(check_cmd::CheckArgs),
+    /// Look after a miner's settings. For the operator.
+    Miner(miner_cmd::MinerArgs),
     /// Run the pool: stratum, shares, rewards, payouts and the pages, until asked to stop. The wallet password comes from the environment.
     Serve(serve::ServeArgs),
 }
@@ -74,6 +77,7 @@ async fn main() -> ExitCode {
         Some(Command::Rewards(args)) => finish(rewards_cmd::run::<pool_chain::ActiveChain>(args).await),
         Some(Command::Init(args)) => finish(init_cmd::run::<pool_chain::ActiveChain>(args, secret_from_environment()).await),
         Some(Command::Api(args)) => finish(api_cmd::run::<pool_chain::ActiveChain>(args).await),
+        Some(Command::Miner(args)) => finish(miner_cmd::run::<pool_chain::ActiveChain>(args).await),
         Some(Command::Check(args)) => finish(check_cmd::run::<pool_chain::ActiveChain>(args)),
         Some(Command::Serve(args)) => {
             start_logging();

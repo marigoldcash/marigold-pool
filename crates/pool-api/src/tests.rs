@@ -62,6 +62,8 @@ fn state(db: Db, network: &str, node: Option<SharedNode>) -> Arc<ApiState> {
         metrics: Arc::new(AccountantMetrics::default()),
         node,
         clock: Arc::new(|| NOW),
+        payout_schedule: pool_payout::Schedule::parse("0 5 * * *").unwrap(),
+        password_work: password_gate(),
     })
 }
 
@@ -457,4 +459,428 @@ async fn the_server_answers_over_a_socket_and_stops_when_asked() {
 
     stop.send(true).unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(5), server).await.expect("the server stopped").unwrap().unwrap();
+}
+
+// ---- payment rules in words ----------------------------------------------------------
+
+async fn post_json(app: &Router, path: &str, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+    let request = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("{path}: not JSON ({e}): {}", String::from_utf8_lossy(&bytes))))
+}
+
+#[tokio::test]
+async fn the_pool_says_when_it_pays_in_utc_and_what_the_rule_is() {
+    let app = fake_app(seeded().await);
+    let (_, body) = json(&app, "/api/pool").await;
+    assert_eq!(body["payout_schedule"], "every day at 05:00 UTC");
+    assert_eq!(body["next_payout_ms"], 1_000_011_600_000u64, "05:00 UTC on the same day as the stopped clock");
+    assert_eq!(
+        body["payout_rule"],
+        "Payments are sent every day at 05:00 UTC to every miner who is owed at least their payout level. The level starts at 10.00 TST and each miner can choose a higher one."
+    );
+}
+
+#[tokio::test]
+async fn a_miner_below_their_level_is_told_what_they_are_waiting_for() {
+    let app = fake_app(seeded().await);
+    let (_, alice) = json(&app, "/api/miner/fake:alice").await;
+    assert_eq!(
+        alice["payout_note"],
+        "You are owed 6.00 TST so far. You are paid once you are owed at least 10.00 TST, your payout level, at the first payment run after that. Payments are sent every day at 05:00 UTC."
+    );
+    assert_eq!(
+        (alice["payout_level"]["display"].clone(), alice["payout_level_chosen"].clone(), alice["password_set"].clone()),
+        ("10.00 TST".into(), false.into(), false.into())
+    );
+    assert_eq!(
+        (alice["lowest_payout_level"]["display"].clone(), alice["highest_payout_level"]["display"].clone()),
+        ("10.00 TST".into(), "1000000.00 TST".into())
+    );
+}
+
+#[tokio::test]
+async fn a_miner_owed_enough_is_told_when_the_next_payment_is() {
+    let s = seeded().await;
+    s.db.record_reward_if_new("r2:0", Amount::new(20 * COIN), 2, 0).await.unwrap();
+    s.db.apply_allocation("r2:0", &[(Account::Miner(who("dave")), Amount::new(20 * COIN))], 2).await.unwrap();
+    let app = fake_app(s);
+    let (_, dave) = json(&app, "/api/miner/fake:dave").await;
+    // The stopped clock is 01:46:40 UTC; the next run is at 05:00, three hours and thirteen minutes away.
+    assert_eq!(
+        dave["payout_note"],
+        "You are owed 20.00 TST, which is enough. You will be paid at the next payment run, every day at 05:00 UTC, in about 4 hours."
+    );
+}
+
+#[tokio::test]
+async fn a_miner_with_nothing_yet_and_one_who_is_paid_up_get_their_own_words() {
+    let s = seeded().await;
+    share(&s.db, "carol", "x", 1_000, 1.0).await;
+    let app = fake_app(s);
+    let (_, carol) = json(&app, "/api/miner/fake:carol").await;
+    assert_eq!(carol["payout_note"], "You have not earned anything yet. Rewards are shared out when the pool finds a block.");
+    let (_, bob) = json(&app, "/api/miner/fake:bob").await;
+    assert_eq!(bob["payout_note"], "Everything you have earned has been paid.");
+}
+
+#[test]
+fn lengths_of_time_are_said_the_way_a_person_says_them() {
+    use crate::handlers::in_words_for_tests as words;
+    assert_eq!(words(0), "a minute");
+    assert_eq!(words(60_000), "a minute");
+    assert_eq!(words(61_000), "2 minutes");
+    assert_eq!(words(89 * 60_000), "89 minutes");
+    assert_eq!(words(90 * 60_000), "2 hours");
+    assert_eq!(words(47 * 3_600_000), "47 hours");
+    assert_eq!(words(49 * 3_600_000), "3 days");
+}
+
+// ---- choosing a password -------------------------------------------------------------
+
+const PASSWORD: &str = "correct horse battery";
+
+#[tokio::test]
+async fn a_password_can_be_chosen_once_for_an_address_the_pool_has_seen() {
+    let s = seeded().await;
+    let app = fake_app(s.clone());
+    let (status, body) = post_json(&app, "/api/miner/fake:alice/password", serde_json::json!({ "password": PASSWORD })).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["ok"], true);
+    assert_eq!(
+        body["message"],
+        "Your password is set. You will need it every time you change a setting, so keep it safe. The pool cannot show it to you again."
+    );
+
+    let stored = s.db.miner_account(&who("alice")).await.unwrap().unwrap();
+    assert!(stored.password_hash.starts_with("$argon2"), "only a hash is kept");
+    assert!(!stored.password_hash.contains(PASSWORD));
+    let (_, alice) = json(&app, "/api/miner/fake:alice").await;
+    assert_eq!(alice["password_set"], true);
+
+    let (status, again) =
+        post_json(&app, "/api/miner/fake:alice/password", serde_json::json!({ "password": "another password" })).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(again["error"], "This address already has a password. Enter it to change your settings.");
+    assert!(verify_still(&s, "alice", PASSWORD).await, "the first password still stands: nobody can take over by asking again");
+}
+
+async fn verify_still(s: &Arc<ApiState>, name: &str, password: &str) -> bool {
+    let account = s.db.miner_account(&who(name)).await.unwrap().unwrap();
+    crate::passwords::verify_password(password, &account.password_hash)
+}
+
+#[tokio::test]
+async fn an_address_the_pool_has_never_seen_cannot_be_claimed_in_advance() {
+    let app = fake_app(seeded().await);
+    let (status, body) = post_json(&app, "/api/miner/fake:zed/password", serde_json::json!({ "password": PASSWORD })).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        body["error"],
+        "The pool has not seen any work or earnings from this address yet, so a password cannot be set for it. Start mining with it, wait a minute, then try again."
+    );
+}
+
+#[tokio::test]
+async fn a_password_that_is_too_short_or_an_address_that_is_not_one_is_refused_in_words() {
+    let app = fake_app(seeded().await);
+    let (status, body) = post_json(&app, "/api/miner/fake:alice/password", serde_json::json!({ "password": "short" })).await;
+    assert_eq!((status, body["error"].clone()), (StatusCode::BAD_REQUEST, "Choose a password of at least 8 characters.".into()));
+    let (status, body) = post_json(&app, "/api/miner/nonsense/password", serde_json::json!({ "password": PASSWORD })).await;
+    assert_eq!(
+        (status, body["error"].clone()),
+        (StatusCode::BAD_REQUEST, "That does not look like an address. It starts with fake:.".into())
+    );
+}
+
+// ---- using it ------------------------------------------------------------------------
+
+async fn with_password(name: &str) -> (Arc<ApiState>, Router) {
+    let s = seeded().await;
+    let app = fake_app(s.clone());
+    let (status, _) = post_json(&app, &format!("/api/miner/fake:{name}/password"), serde_json::json!({ "password": PASSWORD })).await;
+    assert_eq!(status, StatusCode::OK);
+    (s, app)
+}
+
+#[tokio::test]
+async fn the_right_password_changes_the_payout_level_and_it_shows_on_their_page() {
+    let (_s, app) = with_password("alice").await;
+    let (status, body) =
+        post_json(&app, "/api/miner/fake:alice/settings", serde_json::json!({ "password": PASSWORD, "payout_level": "25" })).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["message"], "Your payout level is now 25.00 TST. You will be paid once you are owed at least that.");
+    assert_eq!(body["payout_level"]["units"], 25 * COIN);
+    let (_, alice) = json(&app, "/api/miner/fake:alice").await;
+    assert_eq!((alice["payout_level"]["display"].clone(), alice["payout_level_chosen"].clone()), ("25.00 TST".into(), true.into()));
+    assert!(alice["payout_note"].as_str().unwrap().contains("at least 25.00 TST, your payout level"), "{}", alice["payout_note"]);
+}
+
+#[tokio::test]
+async fn a_level_can_be_written_with_decimals_and_is_read_exactly() {
+    let (_s, app) = with_password("alice").await;
+    let (_, body) =
+        post_json(&app, "/api/miner/fake:alice/settings", serde_json::json!({ "password": PASSWORD, "payout_level": "12.34567891" }))
+            .await;
+    assert_eq!(body["payout_level"]["units"], 1_234_567_891u64);
+}
+
+#[tokio::test]
+async fn a_level_below_the_pools_lowest_does_not_work_and_says_why() {
+    let (s, app) = with_password("alice").await;
+    for low in ["9.99999999", "5", "0", "0.5"] {
+        let (status, body) =
+            post_json(&app, "/api/miner/fake:alice/settings", serde_json::json!({ "password": PASSWORD, "payout_level": low })).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{low}");
+        assert_eq!(
+            body["error"],
+            "The lowest payout level is 10.00 TST. Anything lower does not work, because small payments cost the network more to send than they are worth.",
+            "{low}"
+        );
+    }
+    assert_eq!(s.db.miner_account(&who("alice")).await.unwrap().unwrap().payout_level, None, "nothing was changed");
+    let (status, _) =
+        post_json(&app, "/api/miner/fake:alice/settings", serde_json::json!({ "password": PASSWORD, "payout_level": "10" })).await;
+    assert_eq!(status, StatusCode::OK, "ten itself is allowed");
+}
+
+#[tokio::test]
+async fn nonsense_and_absurd_levels_are_refused() {
+    let (_s, app) = with_password("alice").await;
+    for bad in ["abc", "", "-20", "1e3", "12,5", "1.123456789"] {
+        let (status, body) =
+            post_json(&app, "/api/miner/fake:alice/settings", serde_json::json!({ "password": PASSWORD, "payout_level": bad })).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad:?}");
+        assert_eq!(body["error"], "That is not a number of coins. Write it like 25 or 12.5.", "{bad:?}");
+    }
+    let (status, body) =
+        post_json(&app, "/api/miner/fake:alice/settings", serde_json::json!({ "password": PASSWORD, "payout_level": "1000001" }))
+            .await;
+    assert_eq!(
+        (status, body["error"].clone()),
+        (StatusCode::BAD_REQUEST, "The highest payout level you can choose is 1000000.00 TST.".into())
+    );
+}
+
+#[tokio::test]
+async fn asking_to_change_nothing_is_told_so() {
+    let (_s, app) = with_password("alice").await;
+    let (status, body) = post_json(&app, "/api/miner/fake:alice/settings", serde_json::json!({ "password": PASSWORD })).await;
+    assert_eq!(
+        (status, body["error"].clone()),
+        (StatusCode::BAD_REQUEST, "There is nothing to change. Enter a new payout level, a new password, or both.".into())
+    );
+}
+
+#[tokio::test]
+async fn the_wrong_password_changes_nothing() {
+    let (s, app) = with_password("alice").await;
+    let (status, body) =
+        post_json(&app, "/api/miner/fake:alice/settings", serde_json::json!({ "password": "not the password", "payout_level": "99" }))
+            .await;
+    assert_eq!((status, body["error"].clone()), (StatusCode::FORBIDDEN, "That password is not right.".into()));
+    let account = s.db.miner_account(&who("alice")).await.unwrap().unwrap();
+    assert_eq!((account.payout_level, account.failed_attempts), (None, 1));
+}
+
+#[tokio::test]
+async fn settings_cannot_be_changed_before_a_password_exists() {
+    let app = fake_app(seeded().await);
+    let (status, body) =
+        post_json(&app, "/api/miner/fake:bob/settings", serde_json::json!({ "password": PASSWORD, "payout_level": "50" })).await;
+    assert_eq!(
+        (status, body["error"].clone()),
+        (StatusCode::NOT_FOUND, "No password has been set for this address yet. Set one first.".into())
+    );
+}
+
+#[tokio::test]
+async fn the_password_itself_can_be_changed_and_only_the_new_one_works_afterwards() {
+    let (_s, app) = with_password("alice").await;
+    let (status, body) = post_json(
+        &app,
+        "/api/miner/fake:alice/settings",
+        serde_json::json!({ "password": PASSWORD, "new_password": "a brand new password" }),
+    )
+    .await;
+    assert_eq!((status, body["message"].clone()), (StatusCode::OK, "Your password has been changed.".into()));
+    let (status, _) =
+        post_json(&app, "/api/miner/fake:alice/settings", serde_json::json!({ "password": PASSWORD, "payout_level": "20" })).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "the old one no longer works");
+    let (status, _) = post_json(
+        &app,
+        "/api/miner/fake:alice/settings",
+        serde_json::json!({ "password": "a brand new password", "payout_level": "20" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_new_password_that_is_too_short_changes_nothing() {
+    let (_s, app) = with_password("alice").await;
+    let (status, body) = post_json(
+        &app,
+        "/api/miner/fake:alice/settings",
+        serde_json::json!({ "password": PASSWORD, "new_password": "tiny", "payout_level": "30" }),
+    )
+    .await;
+    assert_eq!((status, body["error"].clone()), (StatusCode::BAD_REQUEST, "Choose a password of at least 8 characters.".into()));
+    let (_, alice) = json(&app, "/api/miner/fake:alice").await;
+    assert_eq!(alice["payout_level_chosen"], false, "not even the level that came with it");
+}
+
+// ---- guessing ------------------------------------------------------------------------
+
+#[tokio::test]
+async fn five_wrong_passwords_lock_the_address_for_fifteen_minutes_even_against_the_right_one() {
+    let mut s = seeded().await;
+    let clock = Arc::new(std::sync::atomic::AtomicU64::new(NOW));
+    let c = clock.clone();
+    Arc::get_mut(&mut s).unwrap().clock = Arc::new(move || c.load(Ordering::SeqCst));
+    let app = fake_app(s.clone());
+    post_json(&app, "/api/miner/fake:alice/password", serde_json::json!({ "password": PASSWORD })).await;
+
+    for n in 1..=4 {
+        let (status, _) = post_json(
+            &app,
+            "/api/miner/fake:alice/settings",
+            serde_json::json!({ "password": "wrong password", "payout_level": "20" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "attempt {n}");
+    }
+    let (status, body) =
+        post_json(&app, "/api/miner/fake:alice/settings", serde_json::json!({ "password": "wrong password", "payout_level": "20" }))
+            .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        body["error"],
+        "That password is not right, and there have now been too many wrong ones. This address is locked for 15 minutes."
+    );
+
+    // Even the right password is not tried while the lock holds.
+    let (status, body) =
+        post_json(&app, "/api/miner/fake:alice/settings", serde_json::json!({ "password": PASSWORD, "payout_level": "20" })).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(body["error"], "There have been too many wrong passwords for this address. Try again in 15 minutes.");
+
+    clock.store(NOW + 10 * 60_000, Ordering::SeqCst);
+    let (_, body) =
+        post_json(&app, "/api/miner/fake:alice/settings", serde_json::json!({ "password": PASSWORD, "payout_level": "20" })).await;
+    assert_eq!(body["error"], "There have been too many wrong passwords for this address. Try again in 5 minutes.");
+
+    clock.store(NOW + 15 * 60_000 + 1, Ordering::SeqCst);
+    let (status, _) =
+        post_json(&app, "/api/miner/fake:alice/settings", serde_json::json!({ "password": PASSWORD, "payout_level": "20" })).await;
+    assert_eq!(status, StatusCode::OK, "once the lock has run out the right password works");
+}
+
+#[tokio::test]
+async fn a_right_password_in_between_clears_the_count_of_wrong_ones() {
+    let (s, app) = with_password("alice").await;
+    for _ in 0..4 {
+        post_json(&app, "/api/miner/fake:alice/settings", serde_json::json!({ "password": "wrong password", "payout_level": "20" }))
+            .await;
+    }
+    post_json(&app, "/api/miner/fake:alice/settings", serde_json::json!({ "password": PASSWORD, "payout_level": "20" })).await;
+    assert_eq!(s.db.miner_account(&who("alice")).await.unwrap().unwrap().failed_attempts, 0);
+    let (status, _) =
+        post_json(&app, "/api/miner/fake:alice/settings", serde_json::json!({ "password": "wrong password", "payout_level": "20" }))
+            .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "four wrong, one right, one wrong is not a lock");
+}
+
+#[tokio::test]
+async fn when_the_pool_is_busy_checking_passwords_it_says_so_and_changes_nothing() {
+    let (s, app) = with_password("alice").await;
+    let _held = s.password_work.clone().try_acquire_many_owned(2).unwrap();
+    let (status, body) =
+        post_json(&app, "/api/miner/fake:alice/settings", serde_json::json!({ "password": PASSWORD, "payout_level": "20" })).await;
+    assert_eq!(
+        (status, body["error"].clone()),
+        (StatusCode::SERVICE_UNAVAILABLE, "The pool is busy checking passwords. Please try again in a moment.".into())
+    );
+    let account = s.db.miner_account(&who("alice")).await.unwrap().unwrap();
+    assert_eq!((account.payout_level, account.failed_attempts), (None, 0), "being busy is not a wrong password");
+}
+
+#[tokio::test]
+async fn requests_that_are_too_big_or_not_json_are_refused_in_words() {
+    let app = fake_app(seeded().await);
+    let big = serde_json::json!({ "password": "x".repeat(5000) });
+    let (status, body) = post_json(&app, "/api/miner/fake:alice/password", big).await;
+    assert_eq!((status, body["error"].clone()), (StatusCode::PAYLOAD_TOO_LARGE, "That request is too big.".into()));
+
+    let plain = Request::builder()
+        .method("POST")
+        .uri("/api/miner/fake:alice/password")
+        .header(header::CONTENT_TYPE, "text/plain")
+        .body(Body::from("password=x"))
+        .unwrap();
+    let response = app.clone().oneshot(plain).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE, "a web form from another site cannot do this");
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert!(String::from_utf8_lossy(&bytes).contains("That request must be sent as JSON."));
+
+    let broken = Request::builder()
+        .method("POST")
+        .uri("/api/miner/fake:alice/password")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from("{not json"))
+        .unwrap();
+    let response = app.clone().oneshot(broken).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert!(String::from_utf8_lossy(&bytes).contains("That request was not understood."));
+}
+
+#[tokio::test]
+async fn nothing_in_a_reply_ever_contains_a_password() {
+    let (_s, app) = with_password("alice").await;
+    for (path, body) in [
+        ("/api/miner/fake:alice/settings", serde_json::json!({ "password": PASSWORD, "payout_level": "20" })),
+        ("/api/miner/fake:alice/settings", serde_json::json!({ "password": "the wrong password here", "payout_level": "20" })),
+        ("/api/miner/fake:alice/password", serde_json::json!({ "password": "another one entirely" })),
+    ] {
+        let request = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let bytes = to_bytes(app.clone().oneshot(request).await.unwrap().into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        for secret in [PASSWORD, "the wrong password here", "another one entirely"] {
+            assert!(!text.contains(secret), "{path}: {text}");
+        }
+    }
+    let (_, page) = json(&app, "/api/miner/fake:alice").await;
+    assert!(!page.to_string().contains("argon2"), "not even the hash is shown");
+}
+
+// ---- the page, again --------------------------------------------------------------------
+
+#[test]
+fn the_page_asks_for_passwords_in_password_fields_and_warns_when_the_connection_is_not_secure() {
+    let page = include_str!("dashboard.html");
+    assert!(page.contains("\"password\", \"new-password\"") && page.contains("\"password\", \"current-password\""));
+    assert!(page.contains("is not using a secure (https) connection"));
+    assert!(page.contains("connectionIsSafe"));
+    assert!(page.contains("Protect your settings") && page.contains("Your payout level"));
+}
+
+#[test]
+fn the_page_never_stores_a_password() {
+    let page = include_str!("dashboard.html");
+    assert_eq!(page.matches("localStorage.setItem").count(), 1, "only one thing is ever stored");
+    assert!(page.contains("localStorage.setItem(\"pool-address\""), "and it is the address, which is public");
+    assert!(!page.contains("sessionStorage") && !page.contains("document.cookie"));
 }

@@ -44,13 +44,16 @@ async fn a_fresh_file_gets_the_schema_and_a_second_open_changes_nothing() {
     assert!(!path.exists());
 
     let first = Db::open(&path).await.unwrap();
-    assert_eq!(tables(&first).await, ["allocations", "balances", "blocks", "meta", "miners", "payouts", "rewards", "shares"]);
-    assert_eq!(migrations_applied(&first).await, 2);
+    assert_eq!(
+        tables(&first).await,
+        ["allocations", "balances", "blocks", "meta", "miner_accounts", "miners", "payouts", "rewards", "shares"]
+    );
+    assert_eq!(migrations_applied(&first).await, 3);
     first.meta_set("kept", "yes").await.unwrap();
     first.close().await;
 
     let second = Db::open(&path).await.unwrap();
-    assert_eq!(migrations_applied(&second).await, 2, "the schema is not applied twice");
+    assert_eq!(migrations_applied(&second).await, 3, "the schema is not applied twice");
     assert_eq!(second.meta_get("kept").await.unwrap().as_deref(), Some("yes"), "existing data survives a reopen");
     second.close().await;
 }
@@ -58,7 +61,7 @@ async fn a_fresh_file_gets_the_schema_and_a_second_open_changes_nothing() {
 #[tokio::test]
 async fn the_in_memory_database_has_the_same_schema() {
     let db = db().await;
-    assert_eq!(tables(&db).await.len(), 8);
+    assert_eq!(tables(&db).await.len(), 9);
 }
 
 // ---- shares -------------------------------------------------------------
@@ -589,14 +592,14 @@ async fn a_lock_keeps_a_second_holder_out_until_it_is_given_back_or_runs_out() {
 }
 
 #[tokio::test]
-async fn the_second_migration_is_applied_and_a_reopen_changes_nothing() {
+async fn every_migration_is_applied_once_and_a_reopen_changes_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("pool.db");
     let first = Db::open(&path).await.unwrap();
-    assert_eq!(migrations_applied(&first).await, 2);
+    assert_eq!(migrations_applied(&first).await, 3);
     first.close().await;
     let second = Db::open(&path).await.unwrap();
-    assert_eq!(migrations_applied(&second).await, 2);
+    assert_eq!(migrations_applied(&second).await, 3);
     second.close().await;
 }
 
@@ -750,4 +753,136 @@ async fn payouts_are_counted_by_state() {
 #[tokio::test]
 async fn the_database_answers_a_ping() {
     db().await.ping().await.unwrap();
+}
+
+// ---- miner accounts and their own payout levels -------------------------------------
+
+#[tokio::test]
+async fn an_account_is_made_once_and_a_second_attempt_is_refused() {
+    let db = db().await;
+    let a = addr(1);
+    assert!(db.miner_account(&a).await.unwrap().is_none());
+    db.create_miner_account(&a, "hash-one", None, 10).await.unwrap();
+    let error = db.create_miner_account(&a, "hash-two", None, 20).await.unwrap_err();
+    assert!(matches!(error, DbError::AccountExists(_)), "{error}");
+    let account = db.miner_account(&a).await.unwrap().unwrap();
+    assert_eq!(
+        (account.password_hash.as_str(), account.payout_level, account.failed_attempts, account.locked_until_ms),
+        ("hash-one", None, 0, 0),
+        "the first password stays"
+    );
+}
+
+#[tokio::test]
+async fn settings_change_only_what_is_given() {
+    let db = db().await;
+    let a = addr(1);
+    db.create_miner_account(&a, "h1", Some(amount(25)), 10).await.unwrap();
+    db.update_miner_account(&a, None, Some(amount(40)), 20).await.unwrap();
+    let account = db.miner_account(&a).await.unwrap().unwrap();
+    assert_eq!(
+        (account.password_hash.as_str(), account.payout_level),
+        ("h1", Some(amount(40))),
+        "the level moved, the password did not"
+    );
+    db.update_miner_account(&a, Some("h2"), None, 30).await.unwrap();
+    let account = db.miner_account(&a).await.unwrap().unwrap();
+    assert_eq!(
+        (account.password_hash.as_str(), account.payout_level),
+        ("h2", Some(amount(40))),
+        "the password moved, the level did not"
+    );
+    assert!(matches!(db.update_miner_account(&addr(9), None, Some(amount(1)), 1).await.unwrap_err(), DbError::UnknownAccount(_)));
+}
+
+#[tokio::test]
+async fn wrong_passwords_lock_the_account_after_the_limit_and_a_right_one_clears_the_count() {
+    let db = db().await;
+    let a = addr(1);
+    db.create_miner_account(&a, "h", None, 1).await.unwrap();
+    for n in 1..=4u32 {
+        assert_eq!(db.note_wrong_password(&a, 1_000, 5, 900_000).await.unwrap(), 0, "wrong password number {n} does not lock yet");
+        assert_eq!(db.miner_account(&a).await.unwrap().unwrap().failed_attempts, n);
+    }
+    assert_eq!(db.note_wrong_password(&a, 1_000, 5, 900_000).await.unwrap(), 901_000, "the fifth locks it for fifteen minutes");
+    let locked = db.miner_account(&a).await.unwrap().unwrap();
+    assert_eq!((locked.failed_attempts, locked.locked_until_ms), (0, 901_000), "and the count starts again afterwards");
+
+    db.note_wrong_password(&a, 2_000_000, 5, 900_000).await.unwrap();
+    db.note_right_password(&a).await.unwrap();
+    let cleared = db.miner_account(&a).await.unwrap().unwrap();
+    assert_eq!((cleared.failed_attempts, cleared.locked_until_ms), (0, 0));
+    assert_eq!(db.note_wrong_password(&addr(9), 1, 5, 1).await.unwrap(), 0, "no account, nothing to lock");
+}
+
+#[tokio::test]
+async fn the_operator_can_reset_an_account_and_it_can_be_claimed_again() {
+    let db = db().await;
+    let a = addr(1);
+    db.create_miner_account(&a, "h", Some(amount(50)), 1).await.unwrap();
+    assert!(db.reset_miner_account(&a).await.unwrap());
+    assert!(!db.reset_miner_account(&a).await.unwrap(), "nothing the second time");
+    assert!(db.miner_account(&a).await.unwrap().is_none());
+    db.create_miner_account(&a, "new", None, 2).await.unwrap();
+    assert_eq!(db.miner_account(&a).await.unwrap().unwrap().payout_level, None, "back to the pool's default");
+}
+
+#[tokio::test]
+async fn an_address_is_known_once_it_has_mined_earned_or_been_paid() {
+    let db = db().await;
+    assert!(!db.address_is_known(&addr(1)).await.unwrap());
+    db.upsert_miner(&addr(1), 5).await.unwrap();
+    assert!(db.address_is_known(&addr(1)).await.unwrap(), "it has mined");
+    db.record_reward_if_new("r:0", amount(10), 1, 0).await.unwrap();
+    db.apply_allocation("r:0", &[(Account::Miner(addr(2)), amount(10))], 1).await.unwrap();
+    assert!(db.address_is_known(&addr(2)).await.unwrap(), "it has earned");
+    assert!(!db.address_is_known(&addr(3)).await.unwrap());
+}
+
+async fn owed(db: &Db, who: &MinerAddress, units: u64, key: &str) {
+    db.record_reward_if_new(key, amount(units), 1, 0).await.unwrap();
+    db.apply_allocation(key, &[(Account::Miner(who.clone()), amount(units))], 1).await.unwrap();
+}
+
+#[tokio::test]
+async fn each_miner_is_paid_at_the_higher_of_the_pools_minimum_and_their_own_level() {
+    let db = db().await;
+    let (a, b, c) = (addr(1), addr(2), addr(3));
+    owed(&db, &a, 2_000, "ra").await; // no account: the pool's minimum, 1000
+    owed(&db, &b, 2_000, "rb").await; // chose 5000: not yet
+    owed(&db, &c, 6_000, "rc").await; // chose 5000: enough
+    db.create_miner_account(&b, "h", Some(amount(5_000)), 1).await.unwrap();
+    db.create_miner_account(&c, "h", Some(amount(5_000)), 1).await.unwrap();
+    let names = |list: Vec<EligibleBalance>| list.into_iter().map(|e| e.address.to_string()).collect::<Vec<_>>();
+    assert_eq!(names(db.balances_eligible(amount(1_000)).await.unwrap()), ["fake:miner1", "fake:miner3"]);
+}
+
+#[tokio::test]
+async fn a_level_set_below_a_later_raised_pool_minimum_does_not_get_a_miner_paid_early() {
+    let db = db().await;
+    let a = addr(1);
+    owed(&db, &a, 3_000, "ra").await;
+    db.create_miner_account(&a, "h", Some(amount(1_000)), 1).await.unwrap(); // chose 1000 when the pool's minimum was 1000
+    assert_eq!(db.balances_eligible(amount(1_000)).await.unwrap().len(), 1);
+    assert!(db.balances_eligible(amount(4_000)).await.unwrap().is_empty(), "the operator raised the minimum to 4000, which wins");
+}
+
+#[tokio::test]
+async fn everyone_owed_anything_can_be_listed_whatever_their_level() {
+    let db = db().await;
+    let (a, b) = (addr(1), addr(2));
+    owed(&db, &a, 10, "ra").await;
+    owed(&db, &b, 20, "rb").await;
+    db.create_miner_account(&b, "h", Some(amount(999_999)), 1).await.unwrap();
+    assert_eq!(db.balances_owed().await.unwrap().len(), 2);
+    assert!(db.balances_eligible(amount(5)).await.unwrap().iter().all(|e| e.address != b), "b chose a very high level");
+}
+
+#[tokio::test]
+async fn the_third_migration_is_applied() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(&dir.path().join("pool.db")).await.unwrap();
+    assert_eq!(migrations_applied(&db).await, 3);
+    assert!(tables(&db).await.contains(&"miner_accounts".to_string()));
+    db.close().await;
 }

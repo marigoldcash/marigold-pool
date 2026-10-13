@@ -19,10 +19,10 @@ const NODE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// What goes wrong, as a status and a sentence a person can read. The page
 /// shows the sentence as it is.
-pub(crate) struct ApiError(StatusCode, String);
+pub(crate) struct ApiError(pub(crate) StatusCode, pub(crate) String);
 
 impl ApiError {
-    fn new(status: StatusCode, message: impl Into<String>) -> Self {
+    pub(crate) fn new(status: StatusCode, message: impl Into<String>) -> Self {
         ApiError(status, message.into())
     }
 }
@@ -41,18 +41,37 @@ impl From<DbError> for ApiError {
 }
 
 #[derive(Serialize)]
-struct Money {
-    units: u64,
-    display: String,
+pub(crate) struct Money {
+    pub(crate) units: u64,
+    pub(crate) display: String,
 }
 
-fn money<C: Chain>(amount: Amount) -> Money {
+pub(crate) fn money<C: Chain>(amount: Amount) -> Money {
     Money { units: amount.units(), display: amount.display::<C>().to_string() }
 }
 
 /// Expected hashes over the online window, as hashes per second.
 fn hashrate(hash_value: f64) -> f64 {
     hash_value / (ONLINE_WINDOW_MS as f64 / 1000.0)
+}
+
+/// A length of time as a person would say it: "a minute", "40 minutes", "17 hours".
+fn in_words(ms: u64) -> String {
+    let minutes = ms.div_ceil(60_000);
+    if minutes <= 1 {
+        "a minute".to_owned()
+    } else if minutes < 90 {
+        format!("{minutes} minutes")
+    } else if minutes < 48 * 60 {
+        format!("{} hours", minutes.div_ceil(60))
+    } else {
+        format!("{} days", minutes.div_ceil(60 * 24))
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn in_words_for_tests(ms: u64) -> String {
+    in_words(ms)
 }
 
 fn percent(fee_bp: u16) -> String {
@@ -132,11 +151,15 @@ pub(crate) struct PoolJson {
     window_daa: u64,
     owed_to_miners: Money,
     pool_address: String,
+    payout_schedule: String,
+    next_payout_ms: u64,
+    payout_rule: String,
 }
 
 pub(crate) async fn pool<C: Chain>(State(state): State<Arc<ApiState>>) -> Result<Json<PoolJson>, ApiError> {
     let now = (state.clock)();
     let stats = state.db.pool_stats(now).await?;
+    let schedule = state.payout_schedule.describe();
     Ok(Json(PoolJson {
         network: state.network.clone(),
         ticker: C::ticker(),
@@ -153,6 +176,12 @@ pub(crate) async fn pool<C: Chain>(State(state): State<Arc<ApiState>>) -> Result
         window_daa: state.window_daa,
         owed_to_miners: money::<C>(stats.owed_to_miners),
         pool_address: state.pool_address.clone(),
+        next_payout_ms: state.payout_schedule.next_run_ms(now),
+        payout_rule: format!(
+            "Payments are sent {schedule} to every miner who is owed at least their payout level. The level starts at {} and each miner can choose a higher one.",
+            state.min_payout.display::<C>()
+        ),
+        payout_schedule: schedule,
     }))
 }
 
@@ -183,6 +212,17 @@ pub(crate) struct MinerJson {
     total_paid: Money,
     workers: Vec<WorkerJson>,
     payouts: Vec<MinerPayoutJson>,
+    /// Whether this miner has chosen a password, which they need to change anything here.
+    password_set: bool,
+    /// What they are paid at: the higher of the pool's minimum and the level they chose.
+    payout_level: Money,
+    /// Whether they have chosen a level of their own.
+    payout_level_chosen: bool,
+    lowest_payout_level: Money,
+    highest_payout_level: Money,
+    /// When and why they will or will not be paid, in a sentence.
+    payout_note: String,
+    next_payout_ms: u64,
 }
 
 pub(crate) async fn miner<C: Chain>(
@@ -204,6 +244,32 @@ pub(crate) async fn miner<C: Chain>(
     }
     let (balance, earned, paid) =
         books.map(|b| (b.balance, b.total_earned, b.total_paid)).unwrap_or((Amount::ZERO, Amount::ZERO, Amount::ZERO));
+
+    let account = state.db.miner_account(&address).await?;
+    let chosen = account.as_ref().and_then(|a| a.payout_level);
+    let level = chosen.map(|l| l.max(state.min_payout)).unwrap_or(state.min_payout);
+    let next_payout_ms = state.payout_schedule.next_run_ms(now);
+    let schedule = state.payout_schedule.describe();
+    let payout_note = if balance.is_zero() {
+        if paid.is_zero() {
+            "You have not earned anything yet. Rewards are shared out when the pool finds a block.".to_owned()
+        } else {
+            "Everything you have earned has been paid.".to_owned()
+        }
+    } else if balance >= level {
+        format!(
+            "You are owed {}, which is enough. You will be paid at the next payment run, {schedule}, in about {}.",
+            balance.display::<C>(),
+            in_words(next_payout_ms.saturating_sub(now))
+        )
+    } else {
+        format!(
+            "You are owed {} so far. You are paid once you are owed at least {}, your payout level, at the first payment run after that. Payments are sent {schedule}.",
+            balance.display::<C>(),
+            level.display::<C>()
+        )
+    };
+
     Ok(Json(MinerJson {
         address: address.to_string(),
         balance: money::<C>(balance),
@@ -228,6 +294,13 @@ pub(crate) async fn miner<C: Chain>(
                 time_ms: p.updated_ts_ms,
             })
             .collect(),
+        password_set: account.is_some(),
+        payout_level: money::<C>(level),
+        payout_level_chosen: chosen.is_some(),
+        lowest_payout_level: money::<C>(state.min_payout),
+        highest_payout_level: money::<C>(Amount::from_coins(pool_payout::HIGHEST_PAYOUT_LEVEL_COINS).unwrap_or(Amount::new(u64::MAX))),
+        payout_note,
+        next_payout_ms,
     }))
 }
 

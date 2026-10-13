@@ -22,6 +22,10 @@ pub enum DbError {
     InsufficientBalance { address: String, have: u64, wanted: u64 },
     #[error("a payout with key {0} already exists")]
     DuplicatePayoutKey(String),
+    #[error("{0} already has an account")]
+    AccountExists(String),
+    #[error("{0} has no account")]
+    UnknownAccount(String),
     #[error("payout {0} is not in the database")]
     UnknownPayout(i64),
     #[error("payout {id} is {found}, which cannot go to {wanted}")]

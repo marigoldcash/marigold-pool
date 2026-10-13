@@ -6,17 +6,21 @@
 
 mod handlers;
 mod metrics;
+mod passwords;
+mod settings;
 
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderValue, header};
 use axum::response::Response;
-use axum::routing::get;
+use axum::routing::{get, post};
 use pool_accountant::AccountantMetrics;
 use pool_chain::{Chain, SharedNode};
 use pool_db::Db;
 use pool_domain::Amount;
+use pool_payout::Schedule;
 use std::sync::Arc;
-use tokio::sync::watch;
+use tokio::sync::{Semaphore, watch};
 
 /// The current time in milliseconds since the Unix epoch. A function, so tests
 /// can stop the clock.
@@ -42,7 +46,20 @@ pub struct ApiState {
     /// The node, for the health check. `None`: the node is not checked.
     pub node: Option<SharedNode>,
     pub clock: Clock,
+    /// When payments go out, for the pages to say so.
+    pub payout_schedule: Schedule,
+    /// How many passwords may be checked at the same moment; see `password_gate`.
+    pub password_work: Arc<Semaphore>,
 }
+
+/// Passwords are hashed slowly on purpose. At most this many are checked at once;
+/// anyone else is asked to try again, so a flood of attempts cannot starve the pool.
+pub fn password_gate() -> Arc<Semaphore> {
+    Arc::new(Semaphore::new(2))
+}
+
+/// The biggest request body accepted: a password and a number need far less.
+const MAX_BODY_BYTES: usize = 4096;
 
 /// All the pages and endpoints.
 pub fn router<C: Chain + 'static>(state: Arc<ApiState>) -> Router {
@@ -51,6 +68,8 @@ pub fn router<C: Chain + 'static>(state: Arc<ApiState>) -> Router {
         .route("/health", get(handlers::health))
         .route("/api/pool", get(handlers::pool::<C>))
         .route("/api/miner/{address}", get(handlers::miner::<C>))
+        .route("/api/miner/{address}/password", post(settings::set_password::<C>).layer(DefaultBodyLimit::max(MAX_BODY_BYTES)))
+        .route("/api/miner/{address}/settings", post(settings::change_settings::<C>).layer(DefaultBodyLimit::max(MAX_BODY_BYTES)))
         .route("/api/blocks", get(handlers::blocks))
         .route("/api/payouts", get(handlers::payouts::<C>))
         .route("/metrics", get(metrics::metrics))

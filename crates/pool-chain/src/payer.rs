@@ -56,6 +56,12 @@ pub trait Payer: Send + Sync {
     /// still catching up with the network.
     async fn sighting(&self, txid: &str, watch: &[String]) -> Result<TxSighting, PayError>;
 
+    /// How many of these payments, counted from the front of the list, one
+    /// transaction can carry. The network charges every output for how small it
+    /// is, so a transaction paying many small amounts is too heavy to send at all;
+    /// the pool sizes its batches with this. Always at least one.
+    fn max_outputs(&self, amounts: &[u64]) -> usize;
+
     /// What the wallet can spend right now, in the chain's smallest unit.
     async fn spendable(&self) -> Result<u64, PayError>;
 

@@ -24,7 +24,7 @@ mod engine;
 mod schedule;
 
 pub use engine::{
-    CycleSummary, DEFAULT_BATCH_SIZE, DEFAULT_KEEP_BACK, DEFAULT_MIN_PAYOUT_COINS, DEFAULT_SETTLE, PayoutError, PayoutSettings,
-    describe, recover, run_cycle,
+    CycleSummary, DEFAULT_BATCH_SIZE, DEFAULT_KEEP_BACK, DEFAULT_MIN_PAYOUT_COINS, DEFAULT_SETTLE, HIGHEST_PAYOUT_LEVEL_COINS,
+    MIN_PAYOUT_FLOOR_COINS, PayoutError, PayoutSettings, describe, recover, run_cycle,
 };
 pub use schedule::{Schedule, run_scheduler};

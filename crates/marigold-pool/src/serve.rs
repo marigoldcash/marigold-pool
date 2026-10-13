@@ -171,6 +171,8 @@ pub async fn run_pool<C: Chain + 'static>(
         metrics: Arc::clone(&metrics),
         node: Some(parts.node.clone()),
         clock: system_clock(),
+        payout_schedule: config.payout_schedule,
+        password_work: pool_api::password_gate(),
     });
     let mut api: Option<JoinHandle<std::io::Result<()>>> =
         Some(tokio::spawn(pool_api::serve::<C>(api_state, listener, front.clone())));
@@ -317,6 +319,9 @@ mod tests {
         }
         async fn spendable(&self) -> Result<u64, PayError> {
             Ok(0)
+        }
+        fn max_outputs(&self, amounts: &[u64]) -> usize {
+            amounts.len().max(1)
         }
         async fn owns_address(&self, _: &str) -> Result<bool, PayError> {
             Ok(self.owns)

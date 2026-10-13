@@ -1,12 +1,12 @@
 //! `marigold-pool payout --now`: pay what miners are owed, straight away.
 
-use crate::common::{DB_FILENAME, PoolArgs, coins_to_units};
+use crate::common::{DB_FILENAME, PoolArgs};
 use crate::config::PoolConfig;
 use clap::Args;
 use pool_chain::Chain;
 use pool_db::{Db, PayoutStatus};
 use pool_domain::Amount;
-use pool_payout::{CycleSummary, DEFAULT_MIN_PAYOUT_COINS, PayoutError, PayoutSettings, describe, run_cycle};
+use pool_payout::{CycleSummary, DEFAULT_MIN_PAYOUT_COINS, MIN_PAYOUT_FLOOR_COINS, PayoutError, PayoutSettings, describe, run_cycle};
 use std::path::PathBuf;
 
 #[derive(Args)]
@@ -26,7 +26,7 @@ pub struct PayoutArgs {
     /// Run a payout now. The pool also pays by itself on its schedule.
     #[arg(long)]
     pub now: bool,
-    /// The least a miner must be owed, in coins, decimals allowed (default: the settings file's, or 10).
+    /// The least a miner must be owed, in coins, decimals allowed, and not below 10 (default: the settings file's, or 10).
     #[arg(long)]
     pub min_payout_coins: Option<String>,
 }
@@ -46,14 +46,19 @@ fn resolve<C: Chain>(args: &PayoutArgs) -> Result<(PoolArgs, Amount), String> {
         args.network.clone().or_else(|| config.as_ref().map(|c| c.network.clone())).unwrap_or_else(|| "testnet-10".to_owned());
     let wrpc = args.wrpc.clone().or_else(|| config.as_ref().map(|c| c.node_wrpc.clone()));
 
+    let floor = Amount::from_coins(MIN_PAYOUT_FLOOR_COINS).unwrap_or(Amount::ZERO);
     let min = match &args.min_payout_coins {
-        Some(text) => text
-            .trim()
-            .parse::<f64>()
-            .ok()
-            .and_then(coins_to_units)
-            .map(Amount::new)
-            .ok_or_else(|| format!("{text:?} is not a minimum payout. Write a number of coins above zero, like 10 or 0.5."))?,
+        Some(text) => {
+            let asked = Amount::parse_coins(text)
+                .ok_or_else(|| format!("{text:?} is not a minimum payout. Write a number of coins, like 10 or 25.5."))?;
+            if asked < floor {
+                return Err(format!(
+                    "{text} is below the lowest minimum payout the pool allows, {}. Smaller payments do not work.",
+                    floor.display::<C>()
+                ));
+            }
+            asked
+        }
         None => match &config {
             Some(c) => c.min_payout,
             None => Amount::from_coins(DEFAULT_MIN_PAYOUT_COINS).ok_or("That minimum payout is too large.")?,
@@ -84,7 +89,7 @@ async fn payout<C: Chain>(db: &Db, pool: &PoolArgs, min: Amount, secret: Option<
         + db.payouts_with_status(PayoutStatus::Sent).await.map_err(|e| e.to_string())?.len();
     let owed = db.balances_eligible(min).await.map_err(|e| e.to_string())?;
     if unfinished == 0 && owed.is_empty() {
-        let someone_owed_less = !db.balances_eligible(Amount::ZERO).await.map_err(|e| e.to_string())?.is_empty();
+        let someone_owed_less = !db.balances_owed().await.map_err(|e| e.to_string())?.is_empty();
         let summary = CycleSummary { nobody_owed: true, someone_owed_less, ..CycleSummary::default() };
         return Ok(describe::<C>(&summary, min));
     }
@@ -148,7 +153,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         owe(dir.path(), 100).await;
         let text = run::<FakeChain>(args(dir.path(), true), None, 1).await.unwrap();
-        assert!(text.starts_with("Nobody is owed 10.00 TST or more yet"), "{text}");
+        assert!(text.starts_with("Nobody has reached their payout level yet") && text.contains("starts at 10.00 TST"), "{text}");
     }
 
     #[tokio::test]
@@ -160,22 +165,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_minimum_can_be_lowered_on_the_command_line_with_decimals() {
+    async fn the_minimum_can_be_raised_on_the_command_line_with_decimals() {
         let dir = tempfile::tempdir().unwrap();
-        owe(dir.path(), COIN).await; // owed one coin: under the default ten
-        let mut lowered = args(dir.path(), true);
-        lowered.min_payout_coins = Some("0.5".into());
-        let error = run::<FakeChain>(lowered, None, 1).await.unwrap_err();
+        owe(dir.path(), 12 * COIN).await; // owed twelve: over the default ten
+        let mut raised = args(dir.path(), true);
+        raised.min_payout_coins = Some("12.5".into());
+        let text = run::<FakeChain>(raised, None, 1).await.unwrap();
         assert!(
-            error.contains("MARIGOLD_POOL_WALLET_SECRET"),
-            "owed enough at the lower minimum, so it goes on to the wallet: {error}"
+            text.starts_with("Nobody has reached their payout level yet") && text.contains("starts at 12.50 TST"),
+            "not enough at the higher minimum: {text}"
         );
     }
 
     #[tokio::test]
-    async fn a_nonsense_minimum_is_refused_in_words() {
+    async fn a_minimum_below_ten_or_nonsense_is_refused_in_words() {
         let dir = tempfile::tempdir().unwrap();
-        for bad in ["ten", "0", "-1", ""] {
+        for low in ["9.99999999", "1", "0.5", "0"] {
+            let mut a = args(dir.path(), true);
+            a.min_payout_coins = Some(low.into());
+            let error = run::<FakeChain>(a, None, 1).await.unwrap_err();
+            assert!(error.contains("below the lowest minimum payout the pool allows, 10.00 TST"), "{low:?}: {error}");
+        }
+        for bad in ["ten", "-1", "", "1e1"] {
             let mut a = args(dir.path(), true);
             a.min_payout_coins = Some(bad.into());
             let error = run::<FakeChain>(a, None, 1).await.unwrap_err();
@@ -193,12 +204,12 @@ mod tests {
     #[tokio::test]
     async fn the_settings_file_supplies_the_data_directory_and_the_minimum() {
         let dir = tempfile::tempdir().unwrap();
-        owe(dir.path(), COIN).await;
+        owe(dir.path(), 12 * COIN).await;
         let config_path = dir.path().join("pool.toml");
         std::fs::write(
             &config_path,
             format!(
-                "[chain]\nname = \"marigold\"\n[network]\nid = \"fakenet\"\n[pool]\naddress = \"fake:pool\"\ndata_dir = \"{}\"\nmin_payout_tst = 0.5\n[stratum]\n[[stratum.instances]]\nport = 5570\nmin_share_diff = 1\n",
+                "[chain]\nname = \"marigold\"\n[network]\nid = \"fakenet\"\n[pool]\naddress = \"fake:pool\"\ndata_dir = \"{}\"\nmin_payout_tst = 11\n[stratum]\n[[stratum.instances]]\nport = 5570\nmin_share_diff = 1\n",
                 dir.path().display()
             ),
         )

@@ -9,8 +9,19 @@ use tracing::{debug, error, info, warn};
 /// Miners paid by one transaction.
 pub const DEFAULT_BATCH_SIZE: usize = 50;
 
-/// What a miner must be owed, in whole coins, before they are paid.
+/// What a miner must be owed, in whole coins, before they are paid, unless the
+/// operator sets it otherwise.
 pub const DEFAULT_MIN_PAYOUT_COINS: u64 = 10;
+
+/// The least the minimum payout may be set to, in whole coins, and so the least
+/// any miner can choose for themselves. Below this a payment costs the network
+/// more to carry than it is worth, and fewer than a full batch could be sent in
+/// one transaction. It is also the default.
+pub const MIN_PAYOUT_FLOOR_COINS: u64 = 10;
+
+/// The most a miner may set their own payout level to, in whole coins. It only
+/// exists to catch a slip of the finger that would leave them unpaid for ever.
+pub const HIGHEST_PAYOUT_LEVEL_COINS: u64 = 1_000_000;
 
 /// How much the wallet keeps back from every payout run, so the payment always
 /// leaves a reasonable amount as change. The network charges a transaction for
@@ -296,7 +307,7 @@ async fn cycle(db: &Db, payer: &dyn Payer, settings: &PayoutSettings, now_ms: u6
     let owed = db.balances_eligible(settings.min_payout).await?;
     if owed.is_empty() {
         summary.nobody_owed = true;
-        summary.someone_owed_less = !db.balances_eligible(Amount::ZERO).await?.is_empty();
+        summary.someone_owed_less = !db.balances_owed().await?.is_empty();
         return Ok(summary);
     }
 
@@ -306,7 +317,16 @@ async fn cycle(db: &Db, payer: &dyn Payer, settings: &PayoutSettings, now_ms: u6
     // Only what is left after the amount kept back can be paid out.
     let mut spendable = held.saturating_sub(settings.keep_back.units());
     let mut sent_any = false;
-    for batch in owed.chunks(settings.batch_size.max(1)) {
+    let mut waiting: &[pool_db::EligibleBalance] = &owed;
+    while !waiting.is_empty() {
+        // A batch is as many miners as one transaction can carry: no more than
+        // the batch size, and fewer when the amounts are small and heavy.
+        let most = settings.batch_size.max(1).min(waiting.len());
+        let amounts: Vec<u64> = waiting[..most].iter().map(|b| b.balance.units()).collect();
+        let take = payer.max_outputs(&amounts).clamp(1, most);
+        let (batch, rest) = waiting.split_at(take);
+        waiting = rest;
+
         let total: u64 = batch.iter().map(|b| b.balance.units()).sum();
         if total > spendable {
             summary.skipped_miners += batch.len() as u64;
@@ -363,7 +383,7 @@ pub fn describe<C: Chain>(summary: &CycleSummary, min_payout: Amount) -> String 
     if summary.nobody_owed {
         if summary.someone_owed_less {
             lines.push(format!(
-                "Nobody is owed {} or more yet, so there is nothing to pay. Some miners are owed smaller amounts and will be paid once they reach it.",
+                "Nobody has reached their payout level yet, so there is nothing to pay. A miner is paid once they are owed at least their payout level, which starts at {}.",
                 min_payout.display::<C>()
             ));
         } else {
@@ -438,6 +458,7 @@ mod tests {
         sighting_error: Option<String>,
         asked_about: Vec<(String, Vec<String>)>,
         batch_sizes: Vec<usize>,
+        max_outputs: usize,
         next: u64,
     }
 
@@ -454,6 +475,7 @@ mod tests {
                 sighting_error: None,
                 asked_about: vec![],
                 batch_sizes: vec![],
+                max_outputs: usize::MAX,
                 next: 1,
             }))
         }
@@ -464,6 +486,10 @@ mod tests {
 
         fn set_spendable(&self, n: u64) {
             self.0.lock().unwrap().spendable = n;
+        }
+
+        fn set_max_outputs(&self, n: usize) {
+            self.0.lock().unwrap().max_outputs = n;
         }
 
         fn set_auto_mine(&self, on: bool) {
@@ -534,6 +560,10 @@ mod tests {
 
         async fn spendable(&self) -> Result<u64, PayError> {
             Ok(self.0.lock().unwrap().spendable)
+        }
+
+        fn max_outputs(&self, amounts: &[u64]) -> usize {
+            self.0.lock().unwrap().max_outputs.min(amounts.len()).max(1)
         }
 
         async fn owns_address(&self, _address: &str) -> Result<bool, PayError> {
@@ -607,6 +637,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_batch_is_cut_short_when_the_payments_are_too_heavy_for_one_transaction() {
+        let db = Db::open_in_memory().await.unwrap();
+        let owed: Vec<(usize, u64)> = (0..7).map(|m| (m, 10 * COIN)).collect();
+        owe(&db, &owed).await;
+        let payer = FakePayer::new();
+        payer.set_max_outputs(3); // what the wallet says one transaction can carry
+
+        let summary = run_cycle(&db, &payer, &settings(), NOW).await.unwrap();
+        assert_eq!(payer.batch_sizes(), [3, 3, 1], "seven miners, three to a transaction");
+        assert_eq!((summary.batches_paid, summary.miners_paid), (3, 7));
+        assert!(db.balances_eligible(Amount::ZERO).await.unwrap().is_empty(), "nobody was left out");
+    }
+
+    #[tokio::test]
+    async fn the_batch_size_still_caps_a_wallet_that_would_carry_more() {
+        let db = Db::open_in_memory().await.unwrap();
+        let owed: Vec<(usize, u64)> = (0..7).map(|m| (m, 10 * COIN)).collect();
+        owe(&db, &owed).await;
+        let payer = FakePayer::new();
+        let mut small = settings();
+        small.batch_size = 2;
+        run_cycle(&db, &payer, &small, NOW).await.unwrap();
+        assert_eq!(payer.batch_sizes(), [2, 2, 2, 1]);
+    }
+
+    #[tokio::test]
     async fn running_again_pays_nobody_a_second_time() {
         let db = Db::open_in_memory().await.unwrap();
         owe(&db, &[(1, 20 * COIN)]).await;
@@ -647,6 +703,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_miner_who_chose_a_higher_level_waits_for_it_and_the_others_are_paid() {
+        let db = Db::open_in_memory().await.unwrap();
+        owe(&db, &[(1, 15 * COIN), (2, 15 * COIN), (3, 60 * COIN)]).await;
+        db.create_miner_account(&who(2), "h", Some(Amount::new(50 * COIN)), 1).await.unwrap(); // chose 50: not there yet
+        db.create_miner_account(&who(3), "h", Some(Amount::new(50 * COIN)), 1).await.unwrap(); // chose 50: has 60
+        let payer = FakePayer::new();
+
+        let summary = run_cycle(&db, &payer, &settings(), NOW).await.unwrap();
+        assert_eq!((summary.miners_paid, summary.paid), (2, Amount::new(75 * COIN)));
+        assert_eq!(balance(&db, 1).await, (0, 15 * COIN));
+        assert_eq!(balance(&db, 2).await, (15 * COIN, 0), "owed fifteen but chose fifty: kept, not paid");
+        assert_eq!(balance(&db, 3).await, (0, 60 * COIN));
+
+        db.record_reward_if_new("more", Amount::new(40 * COIN), 2, 0).await.unwrap();
+        db.apply_allocation("more", &[(Account::Miner(who(2)), Amount::new(40 * COIN))], 2).await.unwrap();
+        let later = run_cycle(&db, &payer, &settings(), NOW + 1).await.unwrap();
+        assert_eq!((later.miners_paid, later.paid), (1, Amount::new(55 * COIN)), "fifty-five is over their fifty");
+    }
+
+    #[tokio::test]
+    async fn when_everyone_owed_is_below_their_own_level_the_report_says_so_in_those_words() {
+        let db = Db::open_in_memory().await.unwrap();
+        owe(&db, &[(1, 15 * COIN)]).await;
+        db.create_miner_account(&who(1), "h", Some(Amount::new(50 * COIN)), 1).await.unwrap();
+        let summary = run_cycle(&db, &FakePayer::new(), &settings(), NOW).await.unwrap();
+        assert!(summary.nobody_owed && summary.someone_owed_less);
+        assert!(describe::<FakeChain>(&summary, settings().min_payout).starts_with("Nobody has reached their payout level yet"));
+    }
+
+    #[tokio::test]
     async fn small_balances_are_explained() {
         let db = Db::open_in_memory().await.unwrap();
         owe(&db, &[(1, COIN)]).await;
@@ -654,7 +740,7 @@ mod tests {
         assert!(summary.nobody_owed && summary.someone_owed_less);
         assert_eq!(
             describe::<FakeChain>(&summary, settings().min_payout),
-            "Nobody is owed 10.00 TST or more yet, so there is nothing to pay. Some miners are owed smaller amounts and will be paid once they reach it."
+            "Nobody has reached their payout level yet, so there is nothing to pay. A miner is paid once they are owed at least their payout level, which starts at 10.00 TST."
         );
     }
 

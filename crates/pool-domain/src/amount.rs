@@ -24,6 +24,26 @@ impl Amount {
         coins.checked_mul(UNITS_PER_COIN).map(Amount)
     }
 
+    /// A number of coins written as text, such as `10`, `0.5` or `12.34567891`,
+    /// as an exact amount. Digits and at most one point only, with at most eight
+    /// decimals: no signs, no exponents, no spaces inside. Nothing passes through
+    /// a floating-point number.
+    pub fn parse_coins(text: &str) -> Option<Amount> {
+        let text = text.trim();
+        let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
+        if (whole.is_empty() && fraction.is_empty())
+            || !whole.chars().all(|c| c.is_ascii_digit())
+            || !fraction.chars().all(|c| c.is_ascii_digit())
+            || fraction.len() > 8
+        {
+            return None;
+        }
+        let whole_units = if whole.is_empty() { 0 } else { whole.parse::<u64>().ok()?.checked_mul(UNITS_PER_COIN)? };
+        let padded = format!("{fraction:0<8}");
+        let fraction_units = padded.parse::<u64>().ok()?;
+        whole_units.checked_add(fraction_units).map(Amount)
+    }
+
     pub const fn units(self) -> u64 {
         self.0
     }
@@ -108,6 +128,31 @@ mod tests {
         assert_eq!(a.saturating_sub(Amount::new(11)), Amount::ZERO);
         assert_eq!(Amount::new(u64::MAX).checked_add(Amount::new(1)), None);
         assert!(Amount::ZERO.is_zero());
+    }
+
+    #[test]
+    fn coins_are_read_from_text_exactly() {
+        let units = |t: &str| Amount::parse_coins(t).map(Amount::units);
+        assert_eq!(units("10"), Some(1_000_000_000));
+        assert_eq!(units("0.5"), Some(50_000_000));
+        assert_eq!(units(".5"), Some(50_000_000));
+        assert_eq!(units("5."), Some(500_000_000));
+        assert_eq!(units("12.34567891"), Some(1_234_567_891));
+        assert_eq!(units("0.00000001"), Some(1), "a single smallest unit");
+        assert_eq!(units(" 7 "), Some(700_000_000), "spaces around it are ignored");
+        assert_eq!(units("0"), Some(0));
+        assert_eq!(units("0.1"), Some(10_000_000), "no floating-point error: 0.1 is exactly a tenth");
+        assert_eq!(units("1.1"), Some(110_000_000));
+    }
+
+    #[test]
+    fn anything_that_is_not_a_plain_decimal_is_refused() {
+        for bad in ["", ".", "-1", "+1", "1e3", "1,5", "ten", "1.123456789", "1 2", "0x10", "1..2", "٣", "NaN", "inf"] {
+            assert_eq!(Amount::parse_coins(bad), None, "{bad:?}");
+        }
+        assert_eq!(Amount::parse_coins("184467440737.09551615").map(Amount::units), Some(u64::MAX), "the largest amount");
+        assert_eq!(Amount::parse_coins("184467440737.09551616"), None, "one more overflows");
+        assert_eq!(Amount::parse_coins("999999999999999999999"), None);
     }
 
     #[test]

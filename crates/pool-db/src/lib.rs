@@ -9,6 +9,7 @@
 //! read-only pool, and in WAL mode readers and the writer never block each
 //! other.
 
+mod accounts;
 mod balances;
 mod blocks;
 mod error;
@@ -21,6 +22,7 @@ mod stats;
 #[cfg(test)]
 mod tests;
 
+pub use accounts::MinerAccount;
 pub use balances::{Balance, EligibleBalance};
 pub use blocks::{BlockRow, NewBlock};
 pub use error::DbError;

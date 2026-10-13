@@ -25,15 +25,21 @@ address = ""
 fee_bp = 100
 # Each block reward is shared among the shares of the last window_daa steps (ten steps a second): 36000 is an hour.
 window_daa = 36000
-# A miner is paid once they are owed this many coins (decimals are fine).
+# The least a miner is paid at, and what every miner starts at. It cannot be set
+# below 10, because smaller payments cost the network more to send than they are
+# worth and do not work. Each miner can choose a higher level for themselves on the
+# pool's page, protected by a password they choose there. Decimals are fine.
 min_payout_magld = 10
-# When miners are paid: minute and hour, then three stars. This is every day at 05:00, machine time.
+# When payments go out: minute and hour, then three stars. Always UTC, whatever the
+# machine's clock says. This is every day at 05:00 UTC. At each run, every miner who
+# is owed at least their payout level is paid; the rest wait for the next run.
 payout_cron = "0 5 * * *"
 # The database and the wallet live here.
 data_dir = "/var/lib/marigold/pool"
 
 [api]
-# The pages, the API and the metrics. Keep it on this machine and put a web server in front for the public.
+# The pages, the API and the metrics. Keep it on this machine and put a web server in front
+# for the public. Miners choose passwords on this page, so that web server must use https.
 bind = "127.0.0.1:8788"
 
 [stratum]

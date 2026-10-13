@@ -10,6 +10,7 @@
 use crate::{PayError, PayOutput, Payer, SharedPayer, SubmitGuard, TxSighting, WalletCreated, WalletSettings};
 use futures::TryStreamExt;
 use kaspa_addresses::Address;
+use kaspa_consensus_core::constants::STORAGE_MASS_PARAMETER;
 use kaspa_hashes::Hash;
 use kaspa_wallet_core::prelude::*;
 use kaspa_wallet_core::rpc::Rpc;
@@ -24,6 +25,29 @@ use workflow_core::abortable::Abortable;
 
 /// The wallet's file name inside the pool's wallet folder.
 const WALLET_FILENAME: &str = "marigold-pool";
+
+/// How much of a transaction's weight the payments themselves may use. The limit
+/// is 100,000 for the whole transaction; the rest is room for the inputs that pay
+/// for it, the output that returns the change, and the fee's own weight.
+const PAYMENT_WEIGHT_BUDGET: u64 = 50_000;
+
+/// How many leading amounts fit in one transaction. An output weighs the storage
+/// parameter divided by its amount in the smallest unit (a trillion over the
+/// amount), so 10 coins weighs 1,000 and a single coin weighs 10,000. Always at
+/// least one, so a payment is attempted even when it cannot fit.
+fn outputs_that_fit(amounts: &[u64]) -> usize {
+    let mut used: u64 = 0;
+    let mut count = 0;
+    for &amount in amounts {
+        let weight = STORAGE_MASS_PARAMETER.div_ceil(amount.max(1));
+        if count > 0 && used.saturating_add(weight) > PAYMENT_WEIGHT_BUDGET {
+            break;
+        }
+        used = used.saturating_add(weight);
+        count += 1;
+    }
+    count.max(1)
+}
 
 /// How long a freshly opened wallet gets to learn its balance before the pool
 /// carries on (it then reports itself as not ready until it has).
@@ -220,6 +244,10 @@ impl Payer for MarigoldPayer {
         if entries.iter().any(|entry| entry.outpoint.transaction_id == id) { Ok(TxSighting::InChain) } else { Ok(TxSighting::Unknown) }
     }
 
+    fn max_outputs(&self, amounts: &[u64]) -> usize {
+        outputs_that_fit(amounts)
+    }
+
     async fn owns_address(&self, text: &str) -> Result<bool, PayError> {
         let wanted = address(text)?;
         if self.account.receive_address().ok().as_ref() == Some(&wanted)
@@ -264,6 +292,37 @@ mod tests {
         let message = wallet_open_problem(&settings(), upstream).0;
         assert!(message.contains("most likely the running pool") && message.contains("systemctl stop marigold-pool"), "{message}");
         assert!(!message.contains("Marigold program"), "the library's own wording is replaced: {message}");
+    }
+
+    const COIN: u64 = 100_000_000;
+
+    #[test]
+    fn fifty_payments_of_ten_coins_just_fit_and_a_fifty_first_does_not() {
+        assert_eq!(outputs_that_fit(&[10 * COIN; 50]), 50);
+        assert_eq!(outputs_that_fit(&[10 * COIN; 51]), 50);
+        assert_eq!(outputs_that_fit(&[10 * COIN; 7]), 7, "fewer than the limit is all of them");
+    }
+
+    #[test]
+    fn smaller_payments_weigh_more_so_fewer_fit() {
+        assert_eq!(outputs_that_fit(&[COIN; 20]), 5, "a coin weighs 10,000");
+        assert_eq!(outputs_that_fit(&[2 * COIN; 20]), 10, "two coins weigh 5,000");
+        assert_eq!(outputs_that_fit(&[5 * COIN; 20]), 20, "five coins weigh 2,000, and twenty is only 40,000");
+    }
+
+    #[test]
+    fn a_mixed_list_stops_where_the_weight_runs_out() {
+        // 3 x 1 coin = 30,000, then 10 coins = 1,000 each: 20 more fit (20,000), the next would pass 50,000.
+        let mut list = vec![COIN; 3];
+        list.extend([10 * COIN; 25]);
+        assert_eq!(outputs_that_fit(&list), 3 + 20);
+    }
+
+    #[test]
+    fn a_payment_is_always_attempted_even_when_it_alone_is_too_heavy() {
+        assert_eq!(outputs_that_fit(&[1]), 1);
+        assert_eq!(outputs_that_fit(&[100, COIN]), 1, "the heavy one goes alone");
+        assert_eq!(outputs_that_fit(&[]), 1);
     }
 
     #[test]

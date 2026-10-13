@@ -149,5 +149,12 @@ program at a time, so the pool is stopped for the moment this takes:
          /opt/marigold/bin/marigold-pool payout --now --config /etc/marigold/pool.toml
        systemctl start marigold-pool
 
-(Add  --min-payout-coins 0.5  to pay balances smaller than the settings file's minimum.)
+(The minimum can be raised for one run with  --min-payout-coins 25  but never below 10.)
+
+Miners choose their own payout level, and a password to protect it, on the pool's
+page. If you put the page on the internet, serve it over https: they type passwords
+there. If a miner loses their password, or someone chose one for an address that is
+not theirs, you can clear it (their money is not touched), and they choose a new one:
+
+       /opt/marigold/bin/marigold-pool miner reset --address <their address> --config /etc/marigold/pool.toml
 NEXT

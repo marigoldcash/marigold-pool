@@ -33,6 +33,13 @@
   .error { color: var(--bad); }
   .muted { color: var(--muted); }
   .mono { font-family: ui-monospace, monospace; font-size: .85rem; word-break: break-all; }
+  .ok { color: #1b7f3b; }
+  @media (prefers-color-scheme: dark) { .ok { color: #6fdc8c; } }
+  .box { background: var(--card); border: 1px solid var(--line); border-radius: .5rem; padding: .9rem 1rem; margin-top: 1rem; }
+  .box h3 { margin: 0 0 .5rem; font-size: 1.05rem; }
+  .box form { display: grid; gap: .5rem; max-width: 26rem; }
+  .box label { font-size: .9rem; color: var(--muted); }
+  .warn { border-color: var(--bad); }
 </style>
 </head>
 <body>
@@ -43,7 +50,8 @@
   <div class="grid" id="stats"></div>
 
   <h2>How to join</h2>
-  <p>Point your miner at this pool and log in with your Marigold address, then a dot, then a name for the machine, for example <span class="mono">youraddress.rig1</span>. Each block the pool finds is shared out by how much work each miner did recently, and you are paid automatically once you are owed enough.</p>
+  <p>Point your miner at this pool and log in with your Marigold address, then a dot, then a name for the machine, for example <span class="mono">youraddress.rig1</span>. Each block the pool finds is shared out by how much work each miner did recently.</p>
+  <p id="payrule">Loading the payment rules…</p>
 
   <h2>Your numbers</h2>
   <form id="find">
@@ -85,6 +93,16 @@
     return Math.round(h / 24) + " days ago";
   }
 
+  function until(thenMs, nowMs) {
+    var s = Math.max(0, Math.round((thenMs - nowMs) / 1000));
+    if (s < 90) { return "in about a minute"; }
+    var m = Math.round(s / 60);
+    if (m < 90) { return "in " + m + " minutes"; }
+    var h = Math.round(m / 60);
+    if (h < 48) { return "in " + h + " hours"; }
+    return "in " + Math.round(h / 24) + " days";
+  }
+
   function speed(hps) {
     var units = ["H/s", "kH/s", "MH/s", "GH/s", "TH/s", "PH/s", "EH/s"];
     var i = 0;
@@ -95,6 +113,17 @@
   function get(path) {
     return fetch(path, { cache: "no-store" }).then(function (r) {
       return r.json().then(function (body) { return { ok: r.ok, body: body }; });
+    });
+  }
+
+  function post(path, body) {
+    return fetch(path, {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    }).then(function (r) {
+      return r.json().then(function (reply) { return { ok: r.ok, body: reply }; });
     });
   }
 
@@ -120,8 +149,16 @@
     node.appendChild(tbody);
   }
 
+  // A password sent over plain http can be read by anyone on the way. On the
+  // pool's own machine (through a tunnel) that does not matter.
+  function connectionIsSafe() {
+    var h = window.location.hostname;
+    return window.location.protocol === "https:" || h === "localhost" || h === "127.0.0.1" || h === "[::1]";
+  }
+
   function showPool(p) {
     document.getElementById("sub").textContent = "Mining on the " + p.network + " network. Rewards are paid in " + p.ticker + ".";
+    document.getElementById("payrule").textContent = p.payout_rule + " Anything below your level stays on your account until it gets there.";
     var grid = document.getElementById("stats"); clear(grid);
     grid.appendChild(stat("Miners online", p.miners_online));
     grid.appendChild(stat("Machines online", p.workers_online));
@@ -129,7 +166,9 @@
     grid.appendChild(stat("Blocks found in the last day", p.blocks_24h));
     grid.appendChild(stat("Last block found", ago(p.last_block_ms, p.now_ms)));
     grid.appendChild(stat("Pool fee", p.fee_percent + "%"));
-    grid.appendChild(stat("You are paid once you are owed", p.min_payout.display));
+    grid.appendChild(stat("Payments are sent", p.payout_schedule));
+    grid.appendChild(stat("Next payments", until(p.next_payout_ms, p.now_ms)));
+    grid.appendChild(stat("Lowest payout level", p.min_payout.display));
     grid.appendChild(stat("Owed to miners now", p.owed_to_miners.display));
   }
 
@@ -147,13 +186,88 @@
       "No payments yet.");
   }
 
+  // ---- the miner's own settings ---------------------------------------------------
+
+  function field(form, id, labelText, type, autocomplete, placeholder) {
+    var label = el("label", labelText); label.setAttribute("for", id);
+    var input = document.createElement("input");
+    input.type = type; input.id = id; input.autocomplete = autocomplete; input.spellcheck = false;
+    if (placeholder) { input.placeholder = placeholder; }
+    form.appendChild(label); form.appendChild(input);
+    return input;
+  }
+
+  function say(node, text, good) {
+    clear(node);
+    node.appendChild(el("p", text, good ? "ok" : "error"));
+  }
+
+  // What to tell the person after a change has been saved: the page is rebuilt
+  // with fresh numbers straight afterwards, so the message is kept for it.
+  var pending = null;
+
+  function settingsBox(m) {
+    var box = el("div", null, "box");
+    var message = el("div", null);
+    box.appendChild(message);
+    if (pending) { say(message, pending, true); pending = null; }
+    var safe = connectionIsSafe();
+    if (!safe) {
+      box.className = "box warn";
+      box.appendChild(el("p", "This page is not using a secure (https) connection, so a password typed here could be read by others on the network. Open the pool's address with https:// before choosing or using a password.", "error"));
+    }
+
+    if (!m.password_set) {
+      box.appendChild(el("h3", "Protect your settings"));
+      box.appendChild(el("p", "Choose a password. You will need it every time you change a setting here, such as your payout level. The first person to choose a password for an address owns its settings, so choose yours as soon as you start mining. Your money is always paid to your address, whatever the settings.", "muted"));
+      var form = document.createElement("form");
+      var one = field(form, "pw1", "Choose a password (at least 8 characters)", "password", "new-password");
+      var two = field(form, "pw2", "Type it again", "password", "new-password");
+      var go = el("button", "Set my password"); go.type = "submit"; go.disabled = !safe;
+      form.appendChild(go);
+      form.addEventListener("submit", function (event) {
+        event.preventDefault();
+        if (one.value !== two.value) { say(message, "The two passwords are not the same.", false); return; }
+        post("/api/miner/" + encodeURIComponent(m.address) + "/password", { password: one.value }).then(function (r) {
+          one.value = ""; two.value = "";
+          if (r.ok) { pending = r.body.message; refreshMine(); } else { say(message, r.body.error || "Something went wrong. Please try again.", false); }
+        }).catch(function () { say(message, "The pool could not be reached. Please try again in a moment.", false); });
+      });
+      box.appendChild(form);
+      return box;
+    }
+
+    box.appendChild(el("h3", "Your payout level"));
+    box.appendChild(el("p", "You are paid once you are owed at least " + m.payout_level.display + (m.payout_level_chosen ? " (your choice)" : " (the pool's lowest level, which everyone starts at)") + ". You can choose a higher level, up to " + m.highest_payout_level.display + ". A level lower than " + m.lowest_payout_level.display + " does not work.", "muted"));
+    var change = document.createElement("form");
+    var pw = field(change, "pwnow", "Your password", "password", "current-password");
+    var level = field(change, "lvl", "New payout level, in coins", "text", "off", m.lowest_payout_level.display.replace(/ .*$/, ""));
+    var again = field(change, "pwnew", "New password (leave empty to keep your password)", "password", "new-password");
+    var save = el("button", "Save"); save.type = "submit"; save.disabled = !safe;
+    change.appendChild(save);
+    change.addEventListener("submit", function (event) {
+      event.preventDefault();
+      var body = { password: pw.value };
+      if (level.value.trim() !== "") { body.payout_level = level.value.trim(); }
+      if (again.value !== "") { body.new_password = again.value; }
+      post("/api/miner/" + encodeURIComponent(m.address) + "/settings", body).then(function (r) {
+        pw.value = ""; again.value = "";
+        if (r.ok) { pending = r.body.message; level.value = ""; refreshMine(); } else { say(message, r.body.error || "Something went wrong. Please try again.", false); }
+      }).catch(function () { say(message, "The pool could not be reached. Please try again in a moment.", false); });
+    });
+    box.appendChild(change);
+    return box;
+  }
+
   function showMine(m, nowMs) {
     var box = document.getElementById("mine"); clear(box);
     var grid = el("div", null, "grid");
     grid.appendChild(stat("Owed to you now", m.balance.display));
     grid.appendChild(stat("Earned in total", m.total_earned.display));
     grid.appendChild(stat("Paid to you in total", m.total_paid.display));
+    grid.appendChild(stat("You are paid at", m.payout_level.display));
     box.appendChild(grid);
+    box.appendChild(el("p", m.payout_note));
     box.appendChild(el("h3", "Your machines"));
     var wrap = el("div", null, "scroll"), t = el("table"); wrap.appendChild(t); box.appendChild(wrap);
     table(t, [{ text: "Machine" }, { text: "Speed", num: true }, { text: "Last work seen" }],
@@ -164,6 +278,7 @@
     table(t2, [{ text: "When" }, { text: "Amount", num: true }, { text: "State" }],
       m.payouts.map(function (x) { return [ago(x.time_ms, nowMs), x.amount.display, x.status_text]; }),
       "You have not been paid yet.");
+    box.appendChild(settingsBox(m));
   }
 
   function showProblem(message) {
@@ -174,6 +289,7 @@
   // Times are measured against the pool's own clock, which arrives with the
   // pool numbers, so everything below waits for those first.
   var nowMs = Date.now();
+  var typing = false;
 
   function refreshLists() {
     get("/api/blocks?limit=10").then(function (r) { if (r.ok) { showBlocks(r.body, nowMs); } }).catch(function () {});
@@ -192,9 +308,13 @@
       if (r.ok) { nowMs = r.body.now_ms; showPool(r.body); }
     }).catch(function () {}).then(function () {
       refreshLists();
-      refreshMine();
+      // Do not rebuild the miner's page under someone who is in the middle of typing a password.
+      if (!typing) { refreshMine(); }
     });
   }
+
+  document.addEventListener("focusin", function (event) { typing = event.target.tagName === "INPUT" && (event.target.type === "password" || event.target.id === "lvl"); });
+  document.addEventListener("focusout", function () { typing = false; });
 
   document.getElementById("find").addEventListener("submit", function (event) {
     event.preventDefault();

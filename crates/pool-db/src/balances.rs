@@ -114,16 +114,34 @@ impl Db {
         .transpose()
     }
 
-    /// Miners owed at least `minimum` (and always more than nothing), in
-    /// address order. The pool's own fee account is never in this list.
+    /// Miners owed enough to be paid, in address order: owed at least `minimum`
+    /// (the pool's own minimum) and at least the level they chose for themselves,
+    /// whichever is higher. The pool's own fee account is never in this list.
     pub async fn balances_eligible(&self, minimum: Amount) -> Result<Vec<EligibleBalance>, DbError> {
         let rows = sqlx::query(
-            "SELECT address, balance FROM balances WHERE address != ?1 AND balance > 0 AND balance >= ?2 ORDER BY address",
+            "SELECT b.address AS address, b.balance AS balance FROM balances b LEFT JOIN miner_accounts a ON a.address = b.address \
+             WHERE b.address != ?1 AND b.balance > 0 AND b.balance >= MAX(?2, COALESCE(a.payout_level, 0)) ORDER BY b.address",
         )
         .bind(POOL_ACCOUNT)
         .bind(to_i64(minimum.units(), "payout threshold")?)
         .fetch_all(self.wr())
         .await?;
+        rows.iter()
+            .map(|row| {
+                Ok(EligibleBalance {
+                    address: MinerAddress::from_trusted(row.get("address")),
+                    balance: Amount::new(to_u64(row.get("balance"), "balance")?),
+                })
+            })
+            .collect()
+    }
+
+    /// Every miner owed anything at all, whatever their payout level, in address order.
+    pub async fn balances_owed(&self) -> Result<Vec<EligibleBalance>, DbError> {
+        let rows = sqlx::query("SELECT address, balance FROM balances WHERE address != ?1 AND balance > 0 ORDER BY address")
+            .bind(POOL_ACCOUNT)
+            .fetch_all(self.wr())
+            .await?;
         rows.iter()
             .map(|row| {
                 Ok(EligibleBalance {

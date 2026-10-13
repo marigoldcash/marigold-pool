@@ -38,6 +38,9 @@ pub struct ApiArgs {
     /// The share window in DAA steps, shown on the page.
     #[arg(long, default_value_t = DEFAULT_WINDOW_DAA)]
     pub window_daa: u64,
+    /// When payments go out, shown on the page, written like cron's first two fields: "0 5 * * *" is every day at 05:00 UTC.
+    #[arg(long, default_value = "0 5 * * *")]
+    pub payout_cron: String,
     /// A node to check for the health page, such as grpc://127.0.0.1:26210. Without one the node is not checked.
     #[arg(long)]
     pub node: Option<String>,
@@ -45,6 +48,7 @@ pub struct ApiArgs {
 
 pub async fn run<C: Chain + 'static>(args: ApiArgs) -> Result<String, String> {
     C::address_prefix(&args.network).ok_or_else(|| crate::common::unknown_network(&args.network))?;
+    let payout_schedule = pool_payout::Schedule::parse(&args.payout_cron)?;
     let min_payout = Amount::from_coins(args.min_payout_coins).ok_or("That minimum payout is too large.")?;
     let db = Db::open(&args.data_dir.join(DB_FILENAME))
         .await
@@ -64,6 +68,8 @@ pub async fn run<C: Chain + 'static>(args: ApiArgs) -> Result<String, String> {
         metrics: Arc::new(AccountantMetrics::default()),
         node,
         clock: system_clock(),
+        payout_schedule,
+        password_work: pool_api::password_gate(),
     });
 
     let (stop, shutdown) = watch::channel(false);

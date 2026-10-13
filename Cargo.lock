@@ -4478,7 +4478,7 @@ dependencies = [
 
 [[package]]
 name = "marigold-pool"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5133,7 +5133,7 @@ dependencies = [
 
 [[package]]
 name = "pool-accountant"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "async-trait",
  "pool-chain",
@@ -5147,14 +5147,16 @@ dependencies = [
 
 [[package]]
 name = "pool-api"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
+ "argon2",
  "async-trait",
  "axum",
  "pool-accountant",
  "pool-chain",
  "pool-db",
  "pool-domain",
+ "pool-payout",
  "prometheus",
  "prometheus-parse",
  "serde",
@@ -5166,7 +5168,7 @@ dependencies = [
 
 [[package]]
 name = "pool-chain"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "async-trait",
  "futures",
@@ -5188,7 +5190,7 @@ dependencies = [
 
 [[package]]
 name = "pool-db"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "pool-domain",
  "sqlx",
@@ -5200,7 +5202,7 @@ dependencies = [
 
 [[package]]
 name = "pool-domain"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "pool-chain",
  "serde",
@@ -5210,7 +5212,7 @@ dependencies = [
 
 [[package]]
 name = "pool-payout"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "async-trait",
  "chrono",

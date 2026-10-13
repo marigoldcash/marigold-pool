@@ -9,8 +9,9 @@ use tracing::{error, info, warn};
 /// When the payout cycle runs, written the way cron writes the first two fields:
 /// `minute hour * * *`. The minute is a number, the hour is a number or `*` for
 /// every hour, and the other three fields must be `*`. So `0 5 * * *` is every
-/// day at 05:00 and `30 * * * *` is half past every hour. Times are the
-/// machine's own local time.
+/// day at 05:00 and `30 * * * *` is half past every hour. Times are UTC, whatever
+/// the machine's own clock says, so the pool pays at the same moment everywhere
+/// and nothing shifts with the clocks changing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Schedule {
     minute: u32,
@@ -34,6 +35,24 @@ impl Schedule {
             return Err(wrong());
         }
         Ok(Schedule { minute, hour })
+    }
+
+    /// The schedule in words, for people: `every day at 05:00 UTC`.
+    pub fn describe(&self) -> String {
+        match (self.hour, self.minute) {
+            (Some(hour), minute) => format!("every day at {hour:02}:{minute:02} UTC"),
+            (None, 0) => "every hour, on the hour (UTC)".to_owned(),
+            (None, minute) => format!("every hour, at {minute} minutes past the hour (UTC)"),
+        }
+    }
+
+    /// The first run after `now_ms` (milliseconds since the Unix epoch, UTC), as
+    /// milliseconds since the Unix epoch.
+    pub fn next_run_ms(&self, now_ms: u64) -> u64 {
+        let now = chrono::DateTime::from_timestamp_millis(i64::try_from(now_ms).unwrap_or(i64::MAX))
+            .map(|t| t.naive_utc())
+            .unwrap_or_default();
+        u64::try_from(self.next_after(now).and_utc().timestamp_millis()).unwrap_or(0)
     }
 
     /// The first time strictly after `after` that the schedule fires.
@@ -61,7 +80,7 @@ pub async fn run_scheduler(
     mut shutdown: watch::Receiver<bool>,
 ) {
     loop {
-        let now = chrono::Local::now().naive_local();
+        let now = chrono::Utc::now().naive_utc();
         let next = schedule.next_after(now);
         let wait = (next - now).to_std().unwrap_or(Duration::from_secs(60));
         info!("the next payout run is at {next} (in {} minutes)", wait.as_secs() / 60);
@@ -99,6 +118,23 @@ mod tests {
         assert_eq!(daily.next_after(at(2026, 10, 12, 5, 0, 0)), at(2026, 10, 13, 5, 0, 0), "exactly now means tomorrow");
         assert_eq!(daily.next_after(at(2026, 10, 12, 17, 30, 0)), at(2026, 10, 13, 5, 0, 0));
         assert_eq!(daily.next_after(at(2026, 12, 31, 23, 0, 0)), at(2027, 1, 1, 5, 0, 0), "across a year end");
+    }
+
+    #[test]
+    fn schedules_describe_themselves_in_words_and_say_utc() {
+        assert_eq!(Schedule::parse("0 5 * * *").unwrap().describe(), "every day at 05:00 UTC");
+        assert_eq!(Schedule::parse("30 14 * * *").unwrap().describe(), "every day at 14:30 UTC");
+        assert_eq!(Schedule::parse("0 * * * *").unwrap().describe(), "every hour, on the hour (UTC)");
+        assert_eq!(Schedule::parse("15 * * * *").unwrap().describe(), "every hour, at 15 minutes past the hour (UTC)");
+    }
+
+    #[test]
+    fn the_next_run_as_a_time_is_in_utc() {
+        let daily = Schedule::parse("0 5 * * *").unwrap();
+        // 1,000,000,000,000 ms is 2001-09-09 01:46:40 UTC; the next 05:00 is the same day.
+        assert_eq!(daily.next_run_ms(1_000_000_000_000), 1_000_011_600_000);
+        // At exactly 05:00 the next run is tomorrow's.
+        assert_eq!(daily.next_run_ms(1_000_011_600_000), 1_000_011_600_000 + 86_400_000);
     }
 
     #[test]
