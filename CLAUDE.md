@@ -6,4 +6,6 @@ The ground rules in `PLAN.md` are binding, in particular: builds and tests run o
 
 Steps marked **[marigold]** are done in the node checkout at `../marigold`, committed and pushed there, and the dependency pin here is moved afterwards.
 
+The node repository's `docs/marigold/REPOS.md` maps every Marigold repository and sets the one-checkout-per-session rule; it is the page to read when unsure which repository a change belongs in.
+
 Two skills under `.claude/skills` apply to every Markdown edit and every commit message here; read them before the first of each.
