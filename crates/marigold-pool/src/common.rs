@@ -40,6 +40,36 @@ impl PoolArgs {
     }
 }
 
+/// A number of whole coins, possibly with decimals (up to eight), as the smallest
+/// unit. `None` for anything that is not a number above zero.
+pub fn coins_to_units(coins: f64) -> Option<u64> {
+    if !coins.is_finite() || coins <= 0.0 || coins > 1.0e10 {
+        return None;
+    }
+    let units = (coins * pool_domain::UNITS_PER_COIN as f64).round();
+    (units >= 1.0).then_some(units as u64)
+}
+
 pub fn unknown_network(network: &str) -> String {
     format!("There is no network called \"{network}\". Use mainnet or testnet-10.")
+}
+
+/// Wait until the program is asked to stop: Ctrl-C, or SIGTERM from systemd.
+#[cfg(unix)]
+pub async fn wait_for_stop() {
+    use tokio::signal::unix::{SignalKind, signal};
+    match signal(SignalKind::terminate()) {
+        Ok(mut term) => tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        },
+        Err(_) => {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
+}
+
+#[cfg(not(unix))]
+pub async fn wait_for_stop() {
+    let _ = tokio::signal::ctrl_c().await;
 }

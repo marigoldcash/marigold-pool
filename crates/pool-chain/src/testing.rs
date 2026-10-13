@@ -1,7 +1,12 @@
 //! A chain that exists only in tests, so the crates above `pool-chain` can be
 //! tested without a real backend. Turned on with the `testing` feature.
 
-use crate::{Chain, NodeError, PayError, SharedNode, SharedPayer, WalletCreated, WalletSettings};
+use crate::{
+    BridgeError, BridgeLauncher, BridgeSettings, Chain, NodeError, PayError, PoolEvents, SharedLauncher, SharedNode, SharedPayer,
+    WalletCreated, WalletSettings,
+};
+use std::sync::Arc;
+use tokio::sync::watch;
 
 /// Addresses look like `fake:abc123` on the network "fakenet". The ticker is
 /// TST and the smallest unit is the grain.
@@ -50,7 +55,21 @@ impl Chain for FakeChain {
         Err(PayError("there is no wallet in the tests".into()))
     }
 
+    fn bridge_launcher(_settings: BridgeSettings) -> SharedLauncher {
+        Arc::new(NoBridge)
+    }
+
     async fn open_payer(_settings: &WalletSettings) -> Result<SharedPayer, PayError> {
         Err(PayError("there is no wallet in the tests".into()))
+    }
+}
+
+/// A bridge that is not there.
+struct NoBridge;
+
+#[async_trait::async_trait]
+impl BridgeLauncher for NoBridge {
+    async fn run(&self, _events: Arc<dyn PoolEvents>, _shutdown: watch::Receiver<bool>) -> Result<(), BridgeError> {
+        Err(BridgeError("there is no bridge in the tests".into()))
     }
 }

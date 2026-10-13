@@ -1,0 +1,57 @@
+# Settings for marigold-pool, for the testnet soak.
+#
+# Before the pool will start, fill in [pool] address with the address that
+# `marigold-pool init` prints. Check the file with:
+#
+#   marigold-pool check --config /etc/marigold/pool.toml
+
+[chain]
+# Must match the build: "marigold" for the Marigold build, "kaspa" for the Kaspa one.
+name = "marigold"
+
+[network]
+id = "testnet-10"
+
+[node]
+# The node the stratum bridge and the reward watcher talk to (gRPC)...
+grpc = "127.0.0.1:26210"
+# ...and the one the wallet pays through (wRPC).
+wrpc = "ws://127.0.0.1:27210"
+
+[pool]
+# Where block rewards are paid. Leave blank until `init` has made the wallet.
+address = ""
+# The pool's fee in hundredths of a percent: 100 is one percent.
+fee_bp = 100
+# Each block reward is shared among the shares of the last window_daa steps (ten steps a second): 36000 is an hour.
+window_daa = 36000
+# A miner is paid once they are owed this many coins (decimals are fine).
+min_payout_magld = 10
+# When miners are paid: minute and hour, then three stars. This is every day at 05:00, machine time.
+payout_cron = "0 5 * * *"
+# The database and the wallet live here.
+data_dir = "/var/lib/marigold/pool"
+
+[api]
+# The pages, the API and the metrics. Keep it on this machine and put a web server in front for the public.
+bind = "127.0.0.1:8788"
+
+[stratum]
+# Vardiff aims for this many shares a minute from each machine.
+shares_per_min = 30
+var_diff = true
+pow2_clamp = true
+extranonce_size = 2
+
+# The soak runs beside the rig's existing bridge, on its own ports.
+
+# For CPU miners (marigold-cli mine start --pool <rig>:5570). A CPU does about a
+# megahash a second, so its shares must be a fraction of a difficulty.
+[[stratum.instances]]
+port = ":5570"
+min_share_diff = 0.002
+
+# For ASICs.
+[[stratum.instances]]
+port = ":5571"
+min_share_diff = 2048

@@ -12,6 +12,13 @@ pub const DEFAULT_BATCH_SIZE: usize = 50;
 /// What a miner must be owed, in whole coins, before they are paid.
 pub const DEFAULT_MIN_PAYOUT_COINS: u64 = 10;
 
+/// How much the wallet keeps back from every payout run, so the payment always
+/// leaves a reasonable amount as change. The network charges a transaction for
+/// every small output it creates (a trillion divided by the output's size in the
+/// smallest unit), so paying out nearly everything the wallet holds leaves a
+/// sliver of change that makes the payment too heavy to send at all.
+pub const DEFAULT_KEEP_BACK: Amount = Amount::new(100_000_000);
+
 /// How long a payment that the node has never heard of is given before it is
 /// written off as never sent. It is the margin against a transaction that was
 /// accepted at the very moment the pool stopped.
@@ -35,11 +42,19 @@ pub struct PayoutSettings {
     pub confirm_wait: Duration,
     /// How long a payment the node has never heard of is given before it is cancelled.
     pub settle: Duration,
+    /// What the wallet always keeps back: a run only pays out what leaves at least this much in the wallet.
+    pub keep_back: Amount,
 }
 
 impl PayoutSettings {
     pub fn new(min_payout: Amount) -> Self {
-        PayoutSettings { min_payout, batch_size: DEFAULT_BATCH_SIZE, confirm_wait: Duration::from_secs(60), settle: DEFAULT_SETTLE }
+        PayoutSettings {
+            min_payout,
+            batch_size: DEFAULT_BATCH_SIZE,
+            confirm_wait: Duration::from_secs(60),
+            settle: DEFAULT_SETTLE,
+            keep_back: DEFAULT_KEEP_BACK,
+        }
     }
 }
 
@@ -74,6 +89,8 @@ pub struct CycleSummary {
     /// Miners left unpaid because the wallet did not hold enough.
     pub skipped_miners: u64,
     pub wallet_had: Amount,
+    /// What the wallet was keeping back, when that is why miners were left unpaid.
+    pub kept_back: Amount,
     /// The last batch did not go out; the money is back in the balances.
     pub failed: Option<String>,
     /// A batch may or may not have gone out; it will be checked at the next run.
@@ -283,8 +300,11 @@ async fn cycle(db: &Db, payer: &dyn Payer, settings: &PayoutSettings, now_ms: u6
         return Ok(summary);
     }
 
-    let mut spendable = payer.spendable().await?;
-    summary.wallet_had = Amount::new(spendable);
+    let held = payer.spendable().await?;
+    summary.wallet_had = Amount::new(held);
+    summary.kept_back = settings.keep_back;
+    // Only what is left after the amount kept back can be paid out.
+    let mut spendable = held.saturating_sub(settings.keep_back.units());
     let mut sent_any = false;
     for batch in owed.chunks(settings.batch_size.max(1)) {
         let total: u64 = batch.iter().map(|b| b.balance.units()).sum();
@@ -362,9 +382,10 @@ pub fn describe<C: Chain>(summary: &CycleSummary, min_payout: Amount) -> String 
     }
     if summary.skipped_miners > 0 {
         lines.push(format!(
-            "The pool wallet holds {}, which is not enough to pay {} more miner(s). They were not paid and will be tried again at the next run.",
+            "The pool wallet holds {}, which is not enough to pay {} more miner(s) while keeping {} back so the payment can be made. They were not paid and will be tried again at the next run.",
             summary.wallet_had.display::<C>(),
-            summary.skipped_miners
+            summary.skipped_miners,
+            summary.kept_back.display::<C>()
         ));
     }
     if let Some(why) = &summary.failed {
@@ -514,6 +535,10 @@ mod tests {
         async fn spendable(&self) -> Result<u64, PayError> {
             Ok(self.0.lock().unwrap().spendable)
         }
+
+        async fn owns_address(&self, _address: &str) -> Result<bool, PayError> {
+            Ok(true)
+        }
     }
 
     // ---- fixtures ----------------------------------------------------------
@@ -538,7 +563,13 @@ mod tests {
     }
 
     fn settings() -> PayoutSettings {
-        PayoutSettings { min_payout: Amount::new(10 * COIN), batch_size: 50, confirm_wait: Duration::ZERO, settle: Duration::ZERO }
+        PayoutSettings {
+            min_payout: Amount::new(10 * COIN),
+            batch_size: 50,
+            confirm_wait: Duration::ZERO,
+            settle: Duration::ZERO,
+            keep_back: Amount::ZERO,
+        }
     }
 
     const NOW: u64 = 1_000_000;
@@ -825,6 +856,36 @@ mod tests {
         assert_eq!(db.balances_eligible(Amount::new(10 * COIN)).await.unwrap().len(), 70, "the 70 still have their balance");
         let text = describe::<FakeChain>(&summary, settings().min_payout);
         assert!(text.contains("not enough to pay 70 more miner(s)"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn the_wallet_always_keeps_something_back_so_the_change_is_never_a_sliver() {
+        let db = Db::open_in_memory().await.unwrap();
+        owe(&db, &[(1, 20 * COIN)]).await;
+        let payer = FakePayer::new();
+        let mut keeping = settings();
+        keeping.keep_back = Amount::new(COIN);
+
+        // The wallet holds exactly what is owed: paying it would leave nothing for the change.
+        payer.set_spendable(20 * COIN);
+        let held = run_cycle(&db, &payer, &keeping, NOW).await.unwrap();
+        assert_eq!((held.miners_paid, held.skipped_miners), (0, 1));
+        assert_eq!(payer.sent_batches(), 0, "nothing was written down or sent");
+        assert_eq!(balance(&db, 1).await.0, 20 * COIN, "the miner keeps their balance");
+        let text = describe::<FakeChain>(&held, keeping.min_payout);
+        assert!(text.contains("while keeping 1.00 TST back so the payment can be made"), "{text}");
+
+        // One unit short of owed-plus-the-amount-kept-back is still too little; exactly enough is paid.
+        payer.set_spendable(21 * COIN - 1);
+        assert_eq!(run_cycle(&db, &payer, &keeping, NOW + 1).await.unwrap().miners_paid, 0);
+        payer.set_spendable(21 * COIN);
+        let paid = run_cycle(&db, &payer, &keeping, NOW + 2).await.unwrap();
+        assert_eq!((paid.miners_paid, paid.paid), (1, Amount::new(20 * COIN)));
+    }
+
+    #[test]
+    fn the_default_keeps_one_whole_coin_back() {
+        assert_eq!(PayoutSettings::new(Amount::new(10 * COIN)).keep_back, Amount::new(COIN));
     }
 
     // ---- two at once --------------------------------------------------------

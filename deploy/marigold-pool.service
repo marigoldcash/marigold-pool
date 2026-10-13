@@ -1,0 +1,28 @@
+[Unit]
+Description=Marigold mining pool (testnet-10)
+After=network-online.target marigoldd.service
+Wants=network-online.target
+Requires=marigoldd.service
+
+[Service]
+Type=simple
+User=marigold
+Group=marigold
+# The marigold system user has no real home; the wallet library resolves its
+# storage under $HOME, so point it at the pool's own state directory.
+Environment=HOME=/var/lib/marigold/pool
+EnvironmentFile=/etc/marigold/pool.env
+ExecStart=/opt/marigold/bin/marigold-pool serve --config /etc/marigold/pool.toml
+Restart=on-failure
+RestartSec=10
+# Drain the share channel and close the database cleanly before the kill.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/marigold/pool
+
+[Install]
+WantedBy=multi-user.target

@@ -2,7 +2,7 @@
 //! It only reads. Run on its own it shows what the database holds; the full
 //! pool serves the same pages while it runs.
 
-use crate::common::DB_FILENAME;
+use crate::common::{DB_FILENAME, wait_for_stop};
 use clap::Args;
 use pool_accountant::{AccountantMetrics, DEFAULT_FEE_BP, DEFAULT_WINDOW_DAA};
 use pool_api::{ApiState, system_clock};
@@ -75,23 +75,4 @@ pub async fn run<C: Chain + 'static>(args: ApiArgs) -> Result<String, String> {
     let served = pool_api::serve::<C>(state, listener, shutdown).await;
     db.close().await;
     served.map(|_| "Stopped.".to_owned()).map_err(|e| format!("The server stopped with a problem: {e}"))
-}
-
-#[cfg(unix)]
-async fn wait_for_stop() {
-    use tokio::signal::unix::{SignalKind, signal};
-    match signal(SignalKind::terminate()) {
-        Ok(mut term) => tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term.recv() => {}
-        },
-        Err(_) => {
-            let _ = tokio::signal::ctrl_c().await;
-        }
-    }
-}
-
-#[cfg(not(unix))]
-async fn wait_for_stop() {
-    let _ = tokio::signal::ctrl_c().await;
 }

@@ -34,6 +34,8 @@ testing = []
 [dependencies]
 async-trait.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
 kaspa-stratum-bridge = { workspace = true, optional = true }
 kaspa-wallet-core = { workspace = true, optional = true }
 kaspa-wrpc-client = { workspace = true, optional = true }

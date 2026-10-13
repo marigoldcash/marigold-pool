@@ -4478,9 +4478,10 @@ dependencies = [
 
 [[package]]
 name = "marigold-pool"
-version = "0.1.4"
+version = "0.1.7"
 dependencies = [
  "anyhow",
+ "async-trait",
  "clap",
  "pool-accountant",
  "pool-api",
@@ -5132,7 +5133,7 @@ dependencies = [
 
 [[package]]
 name = "pool-accountant"
-version = "0.1.4"
+version = "0.1.7"
 dependencies = [
  "async-trait",
  "pool-chain",
@@ -5146,7 +5147,7 @@ dependencies = [
 
 [[package]]
 name = "pool-api"
-version = "0.1.4"
+version = "0.1.7"
 dependencies = [
  "async-trait",
  "axum",
@@ -5165,7 +5166,7 @@ dependencies = [
 
 [[package]]
 name = "pool-chain"
-version = "0.1.4"
+version = "0.1.7"
 dependencies = [
  "async-trait",
  "futures",
@@ -5180,12 +5181,14 @@ dependencies = [
  "kaspa-wallet-core",
  "kaspa-wrpc-client",
  "thiserror 2.0.21",
+ "tokio",
+ "tracing",
  "workflow-core",
 ]
 
 [[package]]
 name = "pool-db"
-version = "0.1.4"
+version = "0.1.7"
 dependencies = [
  "pool-domain",
  "sqlx",
@@ -5197,7 +5200,7 @@ dependencies = [
 
 [[package]]
 name = "pool-domain"
-version = "0.1.4"
+version = "0.1.7"
 dependencies = [
  "pool-chain",
  "serde",
@@ -5207,7 +5210,7 @@ dependencies = [
 
 [[package]]
 name = "pool-payout"
-version = "0.1.4"
+version = "0.1.7"
 dependencies = [
  "async-trait",
  "chrono",

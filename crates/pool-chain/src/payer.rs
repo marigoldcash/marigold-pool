@@ -58,6 +58,11 @@ pub trait Payer: Send + Sync {
 
     /// What the wallet can spend right now, in the chain's smallest unit.
     async fn spendable(&self) -> Result<u64, PayError>;
+
+    /// Whether this wallet controls `address`: the one `init` printed, or its
+    /// current receive or change address. The pool checks this at start, because
+    /// rewards paid to an address the wallet does not control can never be paid out.
+    async fn owns_address(&self, address: &str) -> Result<bool, PayError>;
 }
 
 pub type SharedPayer = Arc<dyn Payer>;

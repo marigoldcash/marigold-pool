@@ -48,15 +48,19 @@ pub trait Chain {
     /// Make a new pool wallet in `settings.data_dir` and say where rewards
     /// should be paid. Refuses to touch a wallet that already exists.
     fn init_wallet(settings: &WalletSettings) -> impl std::future::Future<Output = Result<WalletCreated, PayError>> + Send;
+    /// The stratum bridge for these settings, ready to run.
+    fn bridge_launcher(settings: BridgeSettings) -> SharedLauncher;
     /// Open the pool wallet and return something that can pay with it.
     fn open_payer(settings: &WalletSettings) -> impl std::future::Future<Output = Result<SharedPayer, PayError>> + Send;
 }
 
+mod bridge;
 mod events;
 mod node;
 mod payer;
 #[cfg(feature = "testing")]
 pub mod testing;
+pub use bridge::{BridgeError, BridgeLauncher, BridgeSettings, SharedLauncher, StratumPort};
 pub use events::{BlockReport, PoolEvents, ShareReport};
 pub use node::{NodeError, NodeUtxo, NodeView, SharedNode};
 pub use payer::{PayError, PayOutput, Payer, SharedPayer, SubmitGuard, TxSighting, WalletCreated, WalletSecret, WalletSettings};

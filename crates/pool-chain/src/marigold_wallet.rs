@@ -29,6 +29,22 @@ const WALLET_FILENAME: &str = "marigold-pool";
 /// carries on (it then reports itself as not ready until it has).
 const BALANCE_WAIT: Duration = Duration::from_secs(120);
 
+/// Why the wallet would not open, in words that say what to do. A wallet can be
+/// open in only one program at a time, so the usual reason is the running pool.
+fn wallet_open_problem(settings: &WalletSettings, error: impl std::fmt::Display) -> PayError {
+    let text = error.to_string();
+    if text.contains("already open in another") {
+        return PayError(
+            "The pool wallet is already open in another program, most likely the running pool. A wallet can be open in only one program at a time: stop the pool (systemctl stop marigold-pool), run this again, then start the pool again."
+                .to_owned(),
+        );
+    }
+    PayError(format!(
+        "The pool wallet would not open. Check the password and that `init` was run in {}. ({text})",
+        settings.data_dir.display()
+    ))
+}
+
 fn problem(what: &str, error: impl std::fmt::Display) -> PayError {
     PayError(format!("The pool wallet could not {what}: {error}"))
 }
@@ -118,12 +134,7 @@ pub(crate) async fn open_payer(settings: &WalletSettings) -> Result<SharedPayer,
         .clone()
         .wallet_open(secret.clone(), Some(WALLET_FILENAME.to_string()), true, false)
         .await
-        .map_err(|e| {
-            PayError(format!(
-                "The pool wallet would not open. Check the password and that `init` was run in {}. ({e})",
-                settings.data_dir.display()
-            ))
-        })?
+        .map_err(|e| wallet_open_problem(settings, e))?
         .ok_or_else(|| PayError("The pool wallet has no accounts. Run `init` first.".into()))?;
     let account_id =
         descriptors.first().ok_or_else(|| PayError("The pool wallet has no accounts. Run `init` first.".into()))?.account_id;
@@ -209,10 +220,60 @@ impl Payer for MarigoldPayer {
         if entries.iter().any(|entry| entry.outpoint.transaction_id == id) { Ok(TxSighting::InChain) } else { Ok(TxSighting::Unknown) }
     }
 
+    async fn owns_address(&self, text: &str) -> Result<bool, PayError> {
+        let wanted = address(text)?;
+        if self.account.receive_address().ok().as_ref() == Some(&wanted)
+            || self.account.change_address().ok().as_ref() == Some(&wanted)
+        {
+            return Ok(true);
+        }
+        // The address `init` printed is the first receive address.
+        if let Ok(derived) = self.account.clone().as_derivation_capable()
+            && let Ok(first) = derived.receive_address_at_index(0).await
+        {
+            return Ok(first == wanted);
+        }
+        Ok(false)
+    }
+
     async fn spendable(&self) -> Result<u64, PayError> {
         match self.account.balance() {
             Some(balance) => Ok(balance.mature),
             None => Err(PayError("The pool wallet has not finished loading its balance yet.".into())),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::WalletSecret;
+
+    fn settings() -> WalletSettings {
+        WalletSettings {
+            network: "testnet-10".into(),
+            wrpc_url: "ws://127.0.0.1:27210".into(),
+            data_dir: "/var/lib/marigold/pool".into(),
+            secret: WalletSecret::new("x".into()),
+        }
+    }
+
+    #[test]
+    fn a_wallet_open_elsewhere_is_explained_as_the_running_pool_with_what_to_do() {
+        let upstream = "that wallet is already open in another Marigold program. Close it there first — two programs writing one wallet would lose whichever of them saved second.";
+        let message = wallet_open_problem(&settings(), upstream).0;
+        assert!(message.contains("most likely the running pool") && message.contains("systemctl stop marigold-pool"), "{message}");
+        assert!(!message.contains("Marigold program"), "the library's own wording is replaced: {message}");
+    }
+
+    #[test]
+    fn any_other_reason_points_at_the_password_and_init() {
+        let message = wallet_open_problem(&settings(), "wrong password").0;
+        assert!(
+            message
+                .starts_with("The pool wallet would not open. Check the password and that `init` was run in /var/lib/marigold/pool."),
+            "{message}"
+        );
+        assert!(message.ends_with("(wrong password)"), "{message}");
     }
 }

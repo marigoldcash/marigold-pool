@@ -3,8 +3,8 @@
 //! from the node this pool is pinned to.
 
 use crate::{
-    BlockReport, Chain, NodeError, NodeUtxo, NodeView, PayError, PoolEvents, ShareReport, SharedNode, SharedPayer, WalletCreated,
-    WalletSettings,
+    BlockReport, BridgeError, BridgeLauncher, BridgeSettings, Chain, NodeError, NodeUtxo, NodeView, PayError, PoolEvents, ShareReport,
+    SharedLauncher, SharedNode, SharedPayer, WalletCreated, WalletSettings,
 };
 use kaspa_addresses::{Address, Prefix};
 use kaspa_consensus_core::config::params::Params;
@@ -30,13 +30,18 @@ struct BridgeSink {
     events: Arc<dyn PoolEvents>,
 }
 
+/// The bridge reports how much work a share stands for in billions of hashes
+/// (its `diff_to_hash` divides by a billion), because its own displays are in
+/// GH/s. The pool's reports are in plain hashes.
+const BRIDGE_HASH_UNIT: f64 = 1_000_000_000.0;
+
 impl kaspa_stratum_bridge::PoolSink for BridgeSink {
     fn share_accepted(&self, event: kaspa_stratum_bridge::ShareEvent) {
         self.events.share_accepted(ShareReport {
             address: event.address,
             worker: event.worker,
             difficulty: event.difficulty,
-            hash_value: event.hash_value,
+            hash_value: event.hash_value * BRIDGE_HASH_UNIT,
             daa_score: event.daa_score,
             blue_score: event.blue_score,
             timestamp_ms: event.timestamp_ms,
@@ -66,6 +71,88 @@ fn network_type(id: &str) -> Option<NetworkType> {
         (NetworkType::Testnet, _) => None,
         (other, None) => Some(other),
         (_, Some(_)) => None,
+    }
+}
+
+/// The Marigold stratum bridge, run in this process.
+struct MarigoldBridge {
+    settings: BridgeSettings,
+}
+
+#[async_trait::async_trait]
+impl BridgeLauncher for MarigoldBridge {
+    async fn run(&self, events: Arc<dyn PoolEvents>, shutdown: tokio::sync::watch::Receiver<bool>) -> Result<(), BridgeError> {
+        use kaspa_stratum_bridge::{KaspaApi, StratumServerBridgeConfig, listen_and_serve_with_sink};
+        let s = &self.settings;
+        let sink = MarigoldChain::bridge_sink(events);
+
+        // One connection to the node, shared by every port.
+        let api = KaspaApi::new(s.node_grpc.clone(), None, shutdown.clone())
+            .await
+            .map_err(|e| BridgeError(format!("The bridge could not connect to the node at {}: {e}", s.node_grpc)))?;
+        tracing::info!("waiting for the node to be in sync before opening the stratum ports");
+        api.wait_for_sync_with_shutdown(shutdown.clone())
+            .await
+            .map_err(|e| BridgeError(format!("The bridge stopped while waiting for the node to be in sync: {e}")))?;
+        if *shutdown.borrow() {
+            return Ok(());
+        }
+
+        let mut ports = tokio::task::JoinSet::new();
+        for (index, port) in s.ports.iter().enumerate() {
+            let config = StratumServerBridgeConfig {
+                instance_id: format!("[stratum {}]", port.listen),
+                stratum_port: port.listen.clone(),
+                kaspad_address: s.node_grpc.clone(),
+                prom_port: String::new(),
+                print_stats: s.print_stats,
+                log_to_file: false,
+                health_check_port: String::new(),
+                block_wait_time: s.block_wait_time,
+                min_share_diff: port.min_share_diff,
+                var_diff: s.var_diff,
+                shares_per_min: s.shares_per_min,
+                var_diff_stats: false,
+                extranonce_size: s.extranonce_size,
+                pow2_clamp: s.pow2_clamp,
+                coinbase_tag_suffix: None,
+                pool_address: Some(s.pool_address.clone()),
+            };
+            let listen = port.listen.clone();
+            let api = Arc::clone(&api);
+            let sink = Arc::clone(&sink);
+            let shutdown = shutdown.clone();
+            // Only the first port starts the node's new-block listener.
+            let concrete = if index == 0 { Some(Arc::clone(&api)) } else { None };
+            ports.spawn(async move {
+                tracing::info!("stratum port {listen} opening");
+                listen_and_serve_with_sink(config, api, concrete, shutdown, sink)
+                    .await
+                    .map_err(|e| format!("stratum port {listen}: {e}"))
+            });
+        }
+
+        // Ports run until shutdown. If one ends early, say why and stop the rest.
+        let mut outcome = Ok(());
+        while let Some(finished) = ports.join_next().await {
+            match finished {
+                Ok(Ok(())) => {}
+                Ok(Err(message)) => {
+                    if outcome.is_ok() {
+                        outcome = Err(BridgeError(format!("The bridge stopped: {message}")));
+                    }
+                    ports.abort_all();
+                }
+                Err(joined) if joined.is_cancelled() => {}
+                Err(joined) => {
+                    if outcome.is_ok() {
+                        outcome = Err(BridgeError(format!("The bridge stopped unexpectedly: {joined}")));
+                    }
+                    ports.abort_all();
+                }
+            }
+        }
+        outcome
     }
 }
 
@@ -189,6 +276,10 @@ impl Chain for MarigoldChain {
         crate::marigold_wallet::init_wallet(settings).await
     }
 
+    fn bridge_launcher(settings: BridgeSettings) -> SharedLauncher {
+        Arc::new(MarigoldBridge { settings })
+    }
+
     async fn open_payer(settings: &WalletSettings) -> Result<SharedPayer, PayError> {
         crate::marigold_wallet::open_payer(settings).await
     }
@@ -240,7 +331,7 @@ mod tests {
             address: "marigoldtest:abc".into(),
             worker: "asic1".into(),
             difficulty: 2048.5,
-            hash_value: 4_194_304.25,
+            hash_value: 4.5,
             daa_score: 111,
             blue_score: 222,
             timestamp_ms: 333,
@@ -252,7 +343,7 @@ mod tests {
                 address: "marigoldtest:abc".into(),
                 worker: "asic1".into(),
                 difficulty: 2048.5,
-                hash_value: 4_194_304.25,
+                hash_value: 4_500_000_000.0,
                 daa_score: 111,
                 blue_score: 222,
                 timestamp_ms: 333,
